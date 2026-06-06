@@ -1,0 +1,103 @@
+{
+  "timestamp": "2026-06-05T09:00:01.765Z",
+  "complianceScore": 100,
+  "rbacViolations": 0,
+  "testCases": [
+    {
+      "role": "receptionist",
+      "endpoint": "/api/administrator/profit-loss",
+      "method": "GET",
+      "shouldAllow": false,
+      "allowed": false,
+      "passed": true
+    },
+    {
+      "role": "receptionist",
+      "endpoint": "/api/administrator/expenses",
+      "method": "POST",
+      "shouldAllow": false,
+      "allowed": false,
+      "passed": true
+    },
+    {
+      "role": "receptionist",
+      "endpoint": "/api/reception/transactions",
+      "method": "GET",
+      "shouldAllow": true,
+      "allowed": true,
+      "passed": true
+    },
+    {
+      "role": "doctor",
+      "endpoint": "/api/administrator/profit-loss",
+      "method": "GET",
+      "shouldAllow": false,
+      "allowed": false,
+      "passed": true
+    },
+    {
+      "role": "doctor",
+      "endpoint": "/api/administrator/expenses",
+      "method": "POST",
+      "shouldAllow": false,
+      "allowed": false,
+      "passed": true
+    },
+    {
+      "role": "doctor",
+      "endpoint": "/api/doctor/appointments",
+      "method": "GET",
+      "shouldAllow": true,
+      "allowed": true,
+      "passed": true
+    },
+    {
+      "role": "lab technician",
+      "endpoint": "/api/administrator/profit-loss",
+      "method": "GET",
+      "shouldAllow": false,
+      "allowed": false,
+      "passed": true
+    },
+    {
+      "role": "lab technician",
+      "endpoint": "/api/lab/queue",
+      "method": "GET",
+      "shouldAllow": true,
+      "allowed": true,
+      "passed": true
+    },
+    {
+      "role": "accountant",
+      "endpoint": "/api/administrator/profit-loss",
+      "method": "GET",
+      "shouldAllow": false,
+      "allowed": false,
+      "passed": true
+    },
+    {
+      "role": "accountant",
+      "endpoint": "/api/finance/revenue-logs",
+      "method": "GET",
+      "shouldAllow": true,
+      "allowed": true,
+      "passed": true
+    },
+    {
+      "role": "hospitaladmin",
+      "endpoint": "/api/administrator/profit-loss",
+      "method": "GET",
+      "shouldAllow": true,
+      "allowed": true,
+      "passed": true
+    },
+    {
+      "role": "superadmin",
+      "endpoint": "/api/administrator/profit-loss",
+      "method": "GET",
+      "shouldAllow": true,
+      "allowed": true,
+      "passed": true
+    }
+  ]
+}

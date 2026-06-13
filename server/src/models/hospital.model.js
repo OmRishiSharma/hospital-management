@@ -48,7 +48,8 @@ const hospitalSchema = new mongoose.Schema({
     appointmentFee: { type: Number, default: 500 },
     facilities: [{
         name: { type: String, required: true },
-        pricePerDay: { type: Number, required: true, min: 0 }
+        pricePerDay: { type: Number, required: true, min: 0 },
+        bedCount: { type: Number, default: 0 }
     }],
     // White-label branding config (per hospital)
     branding: { type: brandingSchema, default: () => ({}) },

@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-06-05T09:00:01.765Z",
-  "complianceScore": 100,
-  "rbacViolations": 0,
+  "timestamp": "2026-06-11T06:49:35.629Z",
+  "complianceScore": 90,
+  "rbacViolations": 1,
   "testCases": [
     {
       "role": "receptionist",
@@ -72,8 +72,8 @@
       "endpoint": "/api/administrator/profit-loss",
       "method": "GET",
       "shouldAllow": false,
-      "allowed": false,
-      "passed": true
+      "allowed": true,
+      "passed": false
     },
     {
       "role": "accountant",

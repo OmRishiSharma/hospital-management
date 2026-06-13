@@ -39,6 +39,7 @@ import AdminMainDashboard from '../pages/admin/AdminMainDashboard';
 import AdminMedicines from '../pages/admin/AdminMedicines';
 import AdminQuestionLibrary from '../pages/admin/AdminQuestionLibrary';
 import AdminTestPackages from '../pages/admin/AdminTestPackages';
+import AdminPermissionsPage from '../pages/admin/AdminPermissionsPage';
 
 // Central Admin (Tier 1) Pages — /supremeadmin
 import CentralAdminLogin from '../pages/centraladmin/CentralAdminLogin';
@@ -182,6 +183,7 @@ const MainRoutes = () => {
                             <Route path="admin/medicines" element={<ProtectedRoute requiredPermissions={['admin_manage_roles']}><AdminMedicines /></ProtectedRoute>} />
                             <Route path="admin/question-library" element={<ProtectedRoute requiredPermissions={['admin_manage_roles']}><AdminQuestionLibrary /></ProtectedRoute>} />
                             <Route path="admin/test-packages" element={<ProtectedRoute requiredPermissions={['admin_manage_roles']}><AdminTestPackages /></ProtectedRoute>} />
+                            <Route path="admin/permissions" element={<ProtectedRoute requiredPermissions={['admin_manage_roles']}><AdminPermissionsPage /></ProtectedRoute>} />
                             
                             {/* Dashboard routes — clinic vs full hospital */}
                             <Route path="hospitaladmin" element={
@@ -199,7 +201,7 @@ const MainRoutes = () => {
                             <Route path="lab/orders" element={<ProtectedRoute requiredPermissions={['lab_view', 'lab_manage']}><LabOrders /></ProtectedRoute>} />
                             <Route path="lab/sample-collection" element={<ProtectedRoute requiredPermissions={['lab_view', 'lab_manage']}><SampleCollection /></ProtectedRoute>} />
                             <Route path="lab/processing" element={<ProtectedRoute requiredPermissions={['lab_view', 'lab_manage']}><TestProcessing /></ProtectedRoute>} />
-                            <Route path="lab/completed" element={<ProtectedRoute requiredPermissions={['lab_view', 'lab_manage']}><CompletedReports /></ProtectedRoute>} />
+                            <Route path="lab/completed" element={<ProtectedRoute requiredPermissions={['lab_view', 'lab_manage', 'lab_reports_view']}><CompletedReports /></ProtectedRoute>} />
 
                             {/* Pharmacy Management Pages */}
                             <Route path="pharmacy/inventory" element={<ProtectedRoute requiredPermissions={['pharmacy_view', 'pharmacy_manage']}><PharmacyInventory /></ProtectedRoute>} />
@@ -212,19 +214,19 @@ const MainRoutes = () => {
                             <Route path="accountant/dashboard" element={<ProtectedRoute requiredPermissions={['finance_view']} allowedRoles={['accountant', 'centraladmin', 'superadmin', 'hospitaladmin']}><AccountantDashboard /></ProtectedRoute>} />
 
                             {/* Centralized Patient Billing & Cashier Workspace */}
-                            <Route path="billing/dashboard" element={<ProtectedRoute requiredPermissions={['billing_view']}><BillingDashboard tab="dashboard" /></ProtectedRoute>} />
-                            <Route path="billing/patient" element={<ProtectedRoute requiredPermissions={['billing_view']}><BillingDashboard tab="patient" /></ProtectedRoute>} />
-                            <Route path="billing/pending" element={<ProtectedRoute requiredPermissions={['billing_view']}><BillingDashboard tab="pending" /></ProtectedRoute>} />
-                            <Route path="billing/invoices" element={<ProtectedRoute requiredPermissions={['billing_view']}><BillingDashboard tab="invoices" /></ProtectedRoute>} />
-                            <Route path="billing/collect" element={<ProtectedRoute requiredPermissions={['billing_view']}><BillingDashboard tab="collect" /></ProtectedRoute>} />
-                            <Route path="billing/history" element={<ProtectedRoute requiredPermissions={['billing_view']}><BillingDashboard tab="history" /></ProtectedRoute>} />
-                            <Route path="billing/refunds" element={<ProtectedRoute requiredPermissions={['billing_view']}><BillingDashboard tab="refunds" /></ProtectedRoute>} />
-                            <Route path="billing/reports" element={<ProtectedRoute requiredPermissions={['billing_view']}><BillingDashboard tab="reports" /></ProtectedRoute>} />
-                            <Route path="billing/analytics" element={<ProtectedRoute requiredPermissions={['billing_view']}><BillingDashboard tab="analytics" /></ProtectedRoute>} />
-                            <Route path="billing/templates" element={<ProtectedRoute requiredPermissions={['billing_view']}><BillingDashboard tab="templates" /></ProtectedRoute>} />
-                            <Route path="billing/settings" element={<ProtectedRoute requiredPermissions={['billing_view']}><BillingDashboard tab="settings" /></ProtectedRoute>} />
+                            <Route path="billing/dashboard" element={<ProtectedRoute requiredPermissions={['billing_view']} allowedRoles={['receptionist', 'reception', 'billing', 'cashier', 'billing executive', 'billing manager', 'senior billing officer', 'accountant']}><BillingDashboard tab="dashboard" /></ProtectedRoute>} />
+                            <Route path="billing/patient" element={<ProtectedRoute requiredPermissions={['billing_view']} allowedRoles={['receptionist', 'reception', 'billing', 'cashier', 'billing executive', 'billing manager', 'senior billing officer']}><BillingDashboard tab="patient" /></ProtectedRoute>} />
+                            <Route path="billing/pending" element={<ProtectedRoute requiredPermissions={['billing_view']} allowedRoles={['receptionist', 'reception', 'billing', 'cashier', 'billing executive', 'billing manager', 'senior billing officer']}><BillingDashboard tab="pending" /></ProtectedRoute>} />
+                            <Route path="billing/invoices" element={<ProtectedRoute requiredPermissions={['billing_view']} allowedRoles={['receptionist', 'reception', 'billing', 'cashier', 'billing executive', 'billing manager', 'senior billing officer']}><BillingDashboard tab="invoices" /></ProtectedRoute>} />
+                            <Route path="billing/collect" element={<ProtectedRoute requiredPermissions={['billing_view']} allowedRoles={['receptionist', 'reception', 'billing', 'cashier', 'billing executive', 'billing manager', 'senior billing officer']}><BillingDashboard tab="collect" /></ProtectedRoute>} />
+                            <Route path="billing/history" element={<ProtectedRoute requiredPermissions={['billing_view']} allowedRoles={['billing', 'cashier', 'billing executive', 'billing manager', 'senior billing officer']}><BillingDashboard tab="history" /></ProtectedRoute>} />
+                            <Route path="billing/refunds" element={<ProtectedRoute requiredPermissions={['billing_view']} allowedRoles={['receptionist', 'reception', 'billing', 'cashier', 'billing executive', 'billing manager', 'senior billing officer']}><BillingDashboard tab="refunds" /></ProtectedRoute>} />
+                            <Route path="billing/reports" element={<ProtectedRoute requiredPermissions={['billing_view']} allowedRoles={['receptionist', 'reception', 'billing', 'cashier', 'billing executive', 'billing manager', 'senior billing officer', 'accountant']}><BillingDashboard tab="reports" /></ProtectedRoute>} />
+                            <Route path="billing/analytics" element={<ProtectedRoute requiredPermissions={['billing_view']} allowedRoles={['receptionist', 'reception', 'billing', 'cashier', 'billing executive', 'billing manager', 'senior billing officer', 'accountant']}><BillingDashboard tab="analytics" /></ProtectedRoute>} />
+                            <Route path="billing/templates" element={<ProtectedRoute requiredPermissions={['billing_view']} allowedRoles={['receptionist', 'reception', 'billing', 'cashier', 'billing executive', 'billing manager', 'senior billing officer', 'accountant']}><BillingDashboard tab="templates" /></ProtectedRoute>} />
+                            <Route path="billing/settings" element={<ProtectedRoute requiredPermissions={['billing_view']} allowedRoles={['receptionist', 'reception', 'billing', 'cashier', 'billing executive', 'billing manager', 'senior billing officer', 'accountant']}><BillingDashboard tab="settings" /></ProtectedRoute>} />
                             {/* Legacy Cashier Dashboard Support */}
-                            <Route path="cashier/billing" element={<ProtectedRoute requiredPermissions={['billing_view']}><BillingDashboard tab="patient" /></ProtectedRoute>} />
+                            <Route path="cashier/billing" element={<ProtectedRoute requiredPermissions={['billing_view']} allowedRoles={['receptionist', 'reception', 'billing', 'cashier', 'billing executive', 'billing manager', 'senior billing officer']}><BillingDashboard tab="patient" /></ProtectedRoute>} />
 
                             {/* Hospital Administrator Department */}
                             <Route path="administrator/dashboard" element={<ProtectedRoute requiredPermissions={['administrator_view']}><AdministratorDashboard /></ProtectedRoute>} />

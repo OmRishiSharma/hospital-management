@@ -33,6 +33,7 @@ const PERMISSION_GROUPS = [
             { key: 'appointment_view_all', label: 'View All Appointments' },
             { key: 'lab_view', label: 'View Lab Tests' },
             { key: 'lab_manage', label: 'Manage Lab Tests' },
+            { key: 'lab_reports_view', label: 'View Lab Reports' },
             { key: 'pharmacy_view', label: 'View Pharmacy' },
             { key: 'pharmacy_manage', label: 'Pharmacy & Inventory' }
         ]
@@ -76,8 +77,10 @@ const UserPermissionManager = ({ hospitals = [] }) => {
     const [loading, setLoading] = useState(true);
     const [selectedUser, setSelectedUser] = useState(null);
     const [customPerms, setCustomPerms] = useState([]);
+    const [deniedPerms, setDeniedPerms] = useState([]);
     const [saving, setSaving] = useState(false);
     const [message, setMessage] = useState({ type: '', text: '' });
+    const [showSaveSuccess, setShowSaveSuccess] = useState(false);
     const [searchQuery, setSearchQuery] = useState('');
     const [hospitalFilter, setHospitalFilter] = useState('');
     const [roleFilter, setRoleFilter] = useState('');
@@ -108,22 +111,28 @@ const UserPermissionManager = ({ hospitals = [] }) => {
     const openUser = (user) => {
         setSelectedUser(user);
         setCustomPerms(user.customPermissions || []);
+        setDeniedPerms(user.deniedPermissions || []);
         setMessage({ type: '', text: '' });
     };
 
     const closeUser = () => {
         setSelectedUser(null);
         setCustomPerms([]);
+        setDeniedPerms([]);
         setMessage({ type: '', text: '' });
     };
 
     const togglePerm = (key) => {
-        // Role permissions cannot be removed from here — only extras can be toggled
         const isRolePerm = (selectedUser?.permissions || []).includes(key);
-        if (isRolePerm) return; // Role perms are read-only in this panel
-        setCustomPerms(prev =>
-            prev.includes(key) ? prev.filter(p => p !== key) : [...prev, key]
-        );
+        if (isRolePerm) {
+            setDeniedPerms(prev =>
+                prev.includes(key) ? prev.filter(p => p !== key) : [...prev, key]
+            );
+        } else {
+            setCustomPerms(prev =>
+                prev.includes(key) ? prev.filter(p => p !== key) : [...prev, key]
+            );
+        }
     };
 
     const handleSave = async () => {
@@ -131,16 +140,18 @@ const UserPermissionManager = ({ hospitals = [] }) => {
         setSaving(true);
         setMessage({ type: '', text: '' });
         try {
-            const res = await adminAPI.updateUserPermissions(selectedUser.id, customPerms);
+            const res = await adminAPI.updateUserPermissions(selectedUser.id, customPerms, deniedPerms);
             if (res.success) {
                 setMessage({ type: 'success', text: `✅ Permissions saved for ${selectedUser.name}` });
+                setShowSaveSuccess(true);
                 // Refresh staff list to reflect changes
                 await loadAllStaff();
                 // Update the selected user view
                 setSelectedUser(prev => ({
                     ...prev,
                     customPermissions: customPerms,
-                    effectivePermissions: Array.from(new Set([...(prev.permissions || []), ...customPerms]))
+                    deniedPermissions: deniedPerms,
+                    effectivePermissions: Array.from(new Set([...(prev.permissions || []), ...customPerms].filter(p => !deniedPerms.includes(p))))
                 }));
             } else {
                 setMessage({ type: 'error', text: res.message || 'Failed to save permissions' });
@@ -154,14 +165,15 @@ const UserPermissionManager = ({ hospitals = [] }) => {
 
     const clearAllCustom = () => {
         if (!selectedUser) return;
-        const rolePerms = selectedUser.permissions || [];
-        // Only keep role permissions — clear all custom
         setCustomPerms([]);
+        setDeniedPerms([]);
     };
 
     const grantAll = () => {
-        // Grant all permissions (role + all others)
-        setCustomPerms(ALL_PERMISSIONS.filter(p => !(selectedUser?.permissions || []).includes(p)));
+        if (!selectedUser) return;
+        const rolePerms = selectedUser.permissions || [];
+        setDeniedPerms([]);
+        setCustomPerms(ALL_PERMISSIONS.filter(p => !rolePerms.includes(p)));
     };
 
     // Filtered staff list
@@ -185,13 +197,16 @@ const UserPermissionManager = ({ hospitals = [] }) => {
     const getHospitalName = (hid) => hospitals.find(h => h._id === hid)?.name || 'Unknown';
 
     const getEffectivePermCount = (user) => {
-        return new Set([...(user.permissions || []), ...(user.customPermissions || [])]).size;
+        const rolePerms = user.permissions || [];
+        const customPerms = user.customPermissions || [];
+        const deniedPerms = user.deniedPermissions || [];
+        return new Set([...rolePerms, ...customPerms].filter(p => !deniedPerms.includes(p))).size;
     };
 
     // ─── Permission Panel (right panel when user selected) ──────────────────
     if (selectedUser) {
         const rolePerms = selectedUser.permissions || [];
-        const effectivePerms = Array.from(new Set([...rolePerms, ...customPerms]));
+        const effectivePerms = Array.from(new Set([...rolePerms, ...customPerms].filter(p => !deniedPerms.includes(p))));
 
         return (
             <div style={{ display: 'flex', gap: '0', height: '100%', minHeight: '70vh' }}>
@@ -242,6 +257,10 @@ const UserPermissionManager = ({ hospitals = [] }) => {
                                 <span style={{ color: '#94a3b8' }}>Custom grants</span>
                                 <span style={{ fontWeight: 700, color: '#f59e0b' }}>{customPerms.length}</span>
                             </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '13px' }}>
+                                <span style={{ color: '#94a3b8' }}>Explicitly revoked</span>
+                                <span style={{ fontWeight: 700, color: '#ef4444' }}>{deniedPerms.length}</span>
+                            </div>
                             <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '13px', borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: '8px' }}>
                                 <span style={{ color: '#e2e8f0', fontWeight: 600 }}>Total effective</span>
                                 <span style={{ fontWeight: 700, color: '#6366f1' }}>{effectivePerms.length}</span>
@@ -259,11 +278,15 @@ const UserPermissionManager = ({ hospitals = [] }) => {
                     <div style={{ marginTop: 'auto', fontSize: '11px', color: '#475569' }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '4px' }}>
                             <div style={{ width: '10px', height: '10px', borderRadius: '2px', background: '#10b981' }}></div>
-                            <span>From role (read-only)</span>
+                            <span>From role (active)</span>
                         </div>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '4px' }}>
                             <div style={{ width: '10px', height: '10px', borderRadius: '2px', background: '#f59e0b' }}></div>
-                            <span>Custom grant (toggleable)</span>
+                            <span>Custom grant (active)</span>
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '4px' }}>
+                            <div style={{ width: '10px', height: '10px', borderRadius: '2px', border: '1px solid #ef4444', background: 'transparent' }}></div>
+                            <span>Explicitly revoked</span>
                         </div>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                             <div style={{ width: '10px', height: '10px', borderRadius: '2px', background: '#334155', border: '1px solid #475569' }}></div>
@@ -284,7 +307,7 @@ const UserPermissionManager = ({ hospitals = [] }) => {
                                 🔐 Permission Configuration
                             </h3>
                             <p style={{ margin: '4px 0 0', fontSize: '13px', color: '#64748b' }}>
-                                Grant additional permissions beyond the <strong>{selectedUser.role}</strong> role. Backend enforced.
+                                Grant or revoke permissions beyond the <strong>{selectedUser.role}</strong> role. Backend enforced.
                             </p>
                         </div>
                         <div style={{ display: 'flex', gap: '8px' }}>
@@ -337,26 +360,33 @@ const UserPermissionManager = ({ hospitals = [] }) => {
                                 {group.items.map(item => {
                                     const fromRole = rolePerms.includes(item.key);
                                     const isCustom = customPerms.includes(item.key);
-                                    const isGranted = fromRole || isCustom;
+                                    const isDenied = deniedPerms.includes(item.key);
+                                    const isGranted = (fromRole || isCustom) && !isDenied;
 
                                     return (
                                         <label key={item.key} style={{
                                             display: 'flex', alignItems: 'center', gap: '12px',
-                                            padding: '10px 14px', borderRadius: '8px', cursor: fromRole ? 'default' : 'pointer',
-                                            background: fromRole ? '#f0fdf4' : isCustom ? '#fffbeb' : '#f8fafc',
-                                            border: `1px solid ${fromRole ? '#bbf7d0' : isCustom ? '#fde68a' : '#e2e8f0'}`,
+                                            padding: '10px 14px', borderRadius: '8px', cursor: 'pointer',
+                                            background: (isGranted && fromRole) ? '#f0fdf4' : (isGranted && isCustom) ? '#fffbeb' : isDenied ? '#fef2f2' : '#f8fafc',
+                                            border: `1px solid ${(isGranted && fromRole) ? '#bbf7d0' : (isGranted && isCustom) ? '#fde68a' : isDenied ? '#fecaca' : '#e2e8f0'}`,
                                             transition: 'all 0.15s ease', userSelect: 'none',
-                                            opacity: fromRole ? 0.9 : 1
+                                            opacity: (isGranted && fromRole) ? 0.95 : 1
                                         }}>
-                                            {/* Custom checkbox (role perms are shown but not toggleable) */}
+                                            {/* Custom checkbox */}
                                             <div
-                                                onClick={() => !fromRole && togglePerm(item.key)}
+                                                onClick={() => togglePerm(item.key)}
                                                 style={{
                                                     width: '18px', height: '18px', borderRadius: '4px', flexShrink: 0,
-                                                    border: `2px solid ${fromRole ? '#10b981' : isCustom ? '#f59e0b' : '#cbd5e1'}`,
-                                                    background: fromRole ? '#10b981' : isCustom ? '#f59e0b' : 'transparent',
+                                                    border: `2px solid ${
+                                                        isGranted 
+                                                            ? (fromRole ? '#10b981' : '#f59e0b') 
+                                                            : (isDenied ? '#ef4444' : '#cbd5e1')
+                                                    }`,
+                                                    background: isGranted 
+                                                        ? (fromRole ? '#10b981' : '#f59e0b') 
+                                                        : 'transparent',
                                                     display: 'flex', alignItems: 'center', justifyContent: 'center',
-                                                    cursor: fromRole ? 'default' : 'pointer', transition: 'all 0.15s'
+                                                    cursor: 'pointer', transition: 'all 0.15s'
                                                 }}
                                             >
                                                 {isGranted && <span style={{ color: 'white', fontSize: '11px', fontWeight: 700 }}>✓</span>}
@@ -366,13 +396,19 @@ const UserPermissionManager = ({ hospitals = [] }) => {
                                                 {item.label}
                                             </span>
 
-                                            {fromRole && (
+                                            {fromRole && !isDenied && (
                                                 <span style={{
                                                     fontSize: '10px', fontWeight: 700, color: '#10b981',
                                                     background: '#dcfce7', padding: '2px 8px', borderRadius: '20px'
                                                 }}>ROLE</span>
                                             )}
-                                            {isCustom && !fromRole && (
+                                            {isDenied && (
+                                                <span style={{
+                                                    fontSize: '10px', fontWeight: 700, color: '#ef4444',
+                                                    background: '#fee2e2', padding: '2px 8px', borderRadius: '20px'
+                                                }}>REVOKED</span>
+                                            )}
+                                            {isCustom && (
                                                 <span style={{
                                                     fontSize: '10px', fontWeight: 700, color: '#d97706',
                                                     background: '#fef3c7', padding: '2px 8px', borderRadius: '20px'
@@ -408,6 +444,110 @@ const UserPermissionManager = ({ hospitals = [] }) => {
                         </button>
                     </div>
                 </div>
+
+                {/* Save Success Popup Modal */}
+                {showSaveSuccess && (
+                    <div style={{
+                        position: 'fixed',
+                        inset: 0,
+                        backgroundColor: 'rgba(15, 23, 42, 0.65)',
+                        backdropFilter: 'blur(8px)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        zIndex: 9999,
+                        animation: 'fadeIn 0.25s ease-out'
+                    }}>
+                        <style>{`
+                            @keyframes fadeIn {
+                                from { opacity: 0; }
+                                to { opacity: 1; }
+                            }
+                            @keyframes scaleUp {
+                                from { transform: scale(0.92); opacity: 0; }
+                                to { transform: scale(1); opacity: 1; }
+                            }
+                            @keyframes pulseSuccess {
+                                0% { transform: scale(1); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.4); }
+                                70% { transform: scale(1.04); box-shadow: 0 0 0 10px rgba(16, 185, 129, 0); }
+                                100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
+                            }
+                        `}</style>
+                        <div style={{
+                            background: 'white',
+                            borderRadius: '24px',
+                            padding: '36px 32px',
+                            width: '90%',
+                            maxWidth: '400px',
+                            textAlign: 'center',
+                            boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.25)',
+                            border: '1px solid rgba(226, 232, 240, 0.8)',
+                            animation: 'scaleUp 0.3s cubic-bezier(0.34, 1.56, 0.64, 1)'
+                        }}>
+                            <div style={{
+                                width: '72px',
+                                height: '72px',
+                                borderRadius: '50%',
+                                background: '#dcfce7',
+                                color: '#15803d',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                fontSize: '36px',
+                                margin: '0 auto 20px',
+                                boxShadow: '0 0 0 8px #f0fdf4',
+                                animation: 'pulseSuccess 2s infinite'
+                            }}>
+                                ✓
+                            </div>
+                            
+                            <h3 style={{
+                                margin: '0 0 8px',
+                                fontSize: '20px',
+                                fontWeight: 850,
+                                color: '#1e293b'
+                            }}>
+                                Changes Saved!
+                            </h3>
+                            
+                            <p style={{
+                                margin: '0 0 24px',
+                                fontSize: '14px',
+                                color: '#64748b',
+                                lineHeight: 1.5
+                            }}>
+                                Permissions have been updated successfully for <strong>{selectedUser?.name}</strong>.
+                            </p>
+                            
+                            <button 
+                                onClick={() => setShowSaveSuccess(false)}
+                                style={{
+                                    width: '100%',
+                                    padding: '12px 24px',
+                                    borderRadius: '12px',
+                                    border: 'none',
+                                    background: 'linear-gradient(135deg, #10b981, #059669)',
+                                    color: 'white',
+                                    fontWeight: 700,
+                                    fontSize: '14px',
+                                    cursor: 'pointer',
+                                    boxShadow: '0 4px 12px rgba(16, 185, 129, 0.3)',
+                                    transition: 'all 0.2s'
+                                }}
+                                onMouseEnter={(e) => {
+                                    e.currentTarget.style.opacity = '0.9';
+                                    e.currentTarget.style.transform = 'translateY(-1px)';
+                                }}
+                                onMouseLeave={(e) => {
+                                    e.currentTarget.style.opacity = '1';
+                                    e.currentTarget.style.transform = 'none';
+                                }}
+                            >
+                                OK
+                            </button>
+                        </div>
+                    </div>
+                )}
             </div>
         );
     }

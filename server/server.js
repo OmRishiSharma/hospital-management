@@ -1,4 +1,4 @@
-// server/server.js
+// server/server.js - restarted
 require('dotenv').config();
 const app = require('./src/app');
 const connectDB = require('./src/db/db'); // <--- Import the DB connection logic

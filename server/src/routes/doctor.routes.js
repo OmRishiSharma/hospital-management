@@ -1,18 +1,40 @@
 const express = require('express');
 const router = express.Router();
 const multer = require('multer');
-const Appointment = require('../models/appointment.model');
+const { resolveTenant } = require('../middleware/tenantMiddleware');
+const { getTenantModels } = require('../db/tenantModels');
+const MasterAppointment = require('../models/appointment.model');
 const Doctor = require('../models/doctor.model');
-const User = require('../models/user.model'); // Need User model to update profile
+const MasterUser = require('../models/user.model'); // Need User model to update profile
 const Lab = require('../models/lab.model');
-const LabReport = require('../models/labReport.model');
-const Inventory = require('../models/inventory.model');
-const PharmacyOrder = require('../models/pharmacyOrder.model');
+const MasterLabReport = require('../models/labReport.model');
+const MasterInventory = require('../models/inventory.model');
+const MasterPharmacyOrder = require('../models/pharmacyOrder.model');
 const Notification = require('../models/notification.model');
 const { verifyToken } = require('../middleware/auth.middleware');
 const validateFileType = require('../utils/validateFileType');
 const imagekit = require('../utils/imagekit');
 const ClinicPatient = require('../models/clinicPatient.model');
+
+const getModels = (req) => {
+    if (req.tenantDb) {
+        const m = getTenantModels(req.tenantDb);
+        return {
+            Appointment: m.Appointment,
+            User: m.User,
+            LabReport: m.LabReport,
+            PharmacyOrder: m.PharmacyOrder,
+            Inventory: m.Inventory
+        };
+    }
+    return {
+        Appointment: MasterAppointment,
+        User: MasterUser,
+        LabReport: MasterLabReport,
+        PharmacyOrder: MasterPharmacyOrder,
+        Inventory: MasterInventory
+    };
+};
 
 const ALLOWED_MIMES = ['image/jpeg', 'image/png', 'application/pdf'];
 const upload = multer({
@@ -95,11 +117,12 @@ router.get('/', async (req, res) => {
 });
 
 // 1. GET Unique Patients
-router.get('/patients', verifyToken, async (req, res) => {
+router.get('/patients', verifyToken, resolveTenant, async (req, res) => {
     try {
         const doctorUserId = req.user.id || req.user.userId;
         const query = await getDoctorQuery(doctorUserId, req.user.hospitalId);
 
+        const { Appointment } = getModels(req);
         const appointments = await Appointment.find(query)
             .populate('userId', 'name email phone patientId fertilityProfile')
             .sort({ appointmentDate: -1 })
@@ -128,10 +151,12 @@ router.get('/patients', verifyToken, async (req, res) => {
 });
 
 // 1b. GET Full Patient Profile (comprehensive data)
-router.get('/patients/:patientId/full-profile', verifyToken, async (req, res) => {
+router.get('/patients/:patientId/full-profile', verifyToken, resolveTenant, async (req, res) => {
     try {
         const { patientId } = req.params;
         const hid = req.user.hospitalId;
+
+        const { User, Appointment, LabReport, PharmacyOrder } = getModels(req);
 
         // Get patient info — allow finding globally since patient is already authenticated/linked via appointments
         const patient = await User.findById(patientId).lean();
@@ -148,7 +173,7 @@ router.get('/patients/:patientId/full-profile', verifyToken, async (req, res) =>
         }
 
         const [appointments, labReports, pharmacyOrders] = await Promise.all([
-            Appointment.find(apptQ).populate('doctorId', 'name specialty').sort({ appointmentDate: -1 }).lean(),
+            Appointment.find(apptQ).populate({ path: 'doctorId', model: Doctor, select: 'name specialty' }).sort({ appointmentDate: -1 }).lean(),
             LabReport.find(labQ).populate('labId', 'name').sort({ createdAt: -1 }).lean(),
             PharmacyOrder.find(rxQ).sort({ createdAt: -1 }).lean()
         ]);
@@ -170,6 +195,7 @@ router.get('/patients/:patientId/full-profile', verifyToken, async (req, res) =>
                 aadhaarNumber: patient.aadhaarNumber,
                 isAadhaarVerified: patient.isAadhaarVerified,
                 fertilityProfile: patient.fertilityProfile || {},
+                pastReports: patient.pastReports || [],
                 createdAt: patient.createdAt
             },
             appointments,
@@ -183,7 +209,7 @@ router.get('/patients/:patientId/full-profile', verifyToken, async (req, res) =>
 });
 
 // 2. NEW: Update Patient Profile (Intake Data) by Doctor
-router.put('/patients/:patientId/profile', verifyToken, async (req, res) => {
+router.put('/patients/:patientId/profile', verifyToken, resolveTenant, async (req, res) => {
     try {
         const { patientId } = req.params;
         const updates = req.body;
@@ -192,12 +218,23 @@ router.put('/patients/:patientId/profile', verifyToken, async (req, res) => {
         // Verify patient belongs to same hospital
         const findQuery = { _id: patientId };
         if (hospitalId) findQuery.hospitalId = hospitalId;
+
+        const { User } = getModels(req);
         const user = await User.findOne(findQuery);
         if (!user) return res.status(404).json({ message: 'Patient not found' });
 
         // Merge existing profile with updates
         user.fertilityProfile = { ...user.fertilityProfile, ...updates };
         await user.save();
+
+        // If req.tenantDb is present, this updated the tenant user. We also update the master user!
+        if (req.tenantDb) {
+            const masterUser = await MasterUser.findById(patientId);
+            if (masterUser) {
+                masterUser.fertilityProfile = { ...masterUser.fertilityProfile, ...updates };
+                await masterUser.save();
+            }
+        }
 
         res.json({ success: true, message: 'Patient history updated successfully', profile: user.fertilityProfile });
     } catch (error) {
@@ -207,7 +244,7 @@ router.put('/patients/:patientId/profile', verifyToken, async (req, res) => {
 });
 
 // 3. START SESSION
-router.post('/session/start', verifyToken, async (req, res) => {
+router.post('/session/start', verifyToken, resolveTenant, async (req, res) => {
     try {
         const { patientId } = req.body;
         const doctorUserId = req.user.id || req.user.userId;
@@ -215,6 +252,7 @@ router.post('/session/start', verifyToken, async (req, res) => {
 
         if (!doctor) return res.status(404).json({ message: 'Doctor profile not found' });
 
+        const { Appointment } = getModels(req);
         const newSession = new Appointment({
             userId: patientId,
             hospitalId: req.user.hospitalId || doctor.hospitalId,
@@ -237,8 +275,9 @@ router.post('/session/start', verifyToken, async (req, res) => {
 });
 
 // 4. GET Appointment Details
-router.get('/appointments/:id', verifyToken, async (req, res) => {
+router.get('/appointments/:id', verifyToken, resolveTenant, async (req, res) => {
     try {
+        const { Appointment, User } = getModels(req);
         const apptQuery = { _id: req.params.id };
         if (req.user.hospitalId) apptQuery.hospitalId = req.user.hospitalId;
         const appointment = await Appointment.findOne(apptQuery)
@@ -294,8 +333,9 @@ router.get('/appointments/:id', verifyToken, async (req, res) => {
 });
 
 // 5. GET Appointments List (for this doctor)
-router.get('/appointments', verifyToken, async (req, res) => {
+router.get('/appointments', verifyToken, resolveTenant, async (req, res) => {
     try {
+        const { Appointment } = getModels(req);
         const doctorUserId = req.user.id || req.user.userId;
         const query = await getDoctorQuery(doctorUserId, req.user.hospitalId);
 
@@ -343,8 +383,9 @@ router.get('/appointments', verifyToken, async (req, res) => {
 // 5b. GET ALL Appointments (for nurse/staff - all doctors)
 // DEPARTMENT ISOLATION: If the requesting user has departments assigned,
 // only show appointments where the doctor belongs to one of those departments.
-router.get('/all-appointments', verifyToken, async (req, res) => {
+router.get('/all-appointments', verifyToken, resolveTenant, async (req, res) => {
     try {
+        const { Appointment, User } = getModels(req);
         let query = {};
         if (req.user.hospitalId) {
             query.hospitalId = req.user.hospitalId;
@@ -373,7 +414,7 @@ router.get('/all-appointments', verifyToken, async (req, res) => {
 
         const appointments = await Appointment.find(query)
             .populate('userId', 'name email phone patientId fertilityProfile')
-            .populate('doctorId', 'name specialty departments')
+            .populate({ path: 'doctorId', model: Doctor, select: 'name specialty departments' })
             .populate('doctorUserId', 'name')
             .sort({ appointmentDate: -1, appointmentTime: 1 })
             .lean();
@@ -390,11 +431,10 @@ router.get('/all-appointments', verifyToken, async (req, res) => {
         res.status(500).json({ success: false, message: 'Error fetching all appointments' });
     }
 });
-
-
 // 6. UPDATE Session (Notes)
-router.patch('/appointments/:id/prescription', verifyToken, upload.single('prescriptionFile'), async (req, res) => {
+router.patch('/appointments/:id/prescription', verifyToken, resolveTenant, upload.single('prescriptionFile'), async (req, res) => {
     try {
+        const { Appointment, User, LabReport, PharmacyOrder, Inventory } = getModels(req);
         let uploadedFileEntry = null;
         if (req.file) {
             const typeErr = await validateFileType(req.file, ['image/jpeg', 'image/png', 'application/pdf']);
@@ -417,11 +457,15 @@ router.patch('/appointments/:id/prescription', verifyToken, upload.single('presc
                 return res.status(500).json({ success: false, message: 'File upload failed. Save prescription without file or try again.' });
             }
         }
-        const { status, diagnosis, labTests, dietPlan, pharmacy, notes, labId } = req.body;
+        const { status, diagnosis, labTests, dietPlan, pharmacy, notes, labId, requestReportFollowUp } = req.body;
         const findQuery = { _id: req.params.id };
         if (req.user.hospitalId) findQuery.hospitalId = req.user.hospitalId;
         const appointment = await Appointment.findOne(findQuery);
         if (!appointment) return res.status(404).json({ message: 'Not found' });
+
+        if (requestReportFollowUp !== undefined) {
+            appointment.requestReportFollowUp = String(requestReportFollowUp) === 'true' || requestReportFollowUp === true;
+        }
 
         // Persist uploaded file URL to both legacy field and prescriptions array
         if (uploadedFileEntry) {
@@ -444,7 +488,7 @@ router.patch('/appointments/:id/prescription', verifyToken, upload.single('presc
                 try {
                     appointment.labTests = JSON.parse(labTests);
                 } catch (e) {
-                    appointment.labTests = labTests.split(',').map(t => t.trim()).filter(Boolean);
+                    appointment.labTests = labTests.split(/,(?![^(]*\))/).map(t => t.trim()).filter(Boolean);
                 }
             } else {
                 appointment.labTests = labTests;
@@ -462,10 +506,90 @@ router.patch('/appointments/:id/prescription', verifyToken, upload.single('presc
                     frequency: item.frequency || '',
                     duration: item.duration || ''
                 }));
+
+                // Auto-create missing medicines in master DB and tenant DB
+                const targetHospitalId = req.user.hospitalId || appointment.hospitalId;
+                if (targetHospitalId) {
+                    const Medicine = require('../models/medicine.model');
+                    for (const item of appointment.pharmacy) {
+                        const medName = item.medicineName;
+                        if (!medName) continue;
+                        
+                        // 1. Check if it exists in the hospital's tenant Inventory
+                        let invItem = await Inventory.findOne({
+                            hospitalId: targetHospitalId,
+                            name: { $regex: new RegExp('^' + medName.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$', 'i') }
+                        });
+                        
+                        if (!invItem) {
+                            // 2. Check/add to the global Medicine catalog
+                            let globalMed = await Medicine.findOne({
+                                name: { $regex: new RegExp('^' + medName.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$', 'i') }
+                            });
+                            if (!globalMed) {
+                                try {
+                                    globalMed = await Medicine.create({
+                                        name: medName.trim(),
+                                        genericName: item.saltName ? item.saltName.trim() : '',
+                                        category: 'General',
+                                        description: 'Auto-added from doctor prescription'
+                                    });
+                                    console.log(`[Prescription] Added "${medName}" to global Medicine catalog.`);
+                                } catch (err) {
+                                    console.error('[Prescription] Error saving to global Medicine catalog:', err);
+                                }
+                            }
+                            
+                            // 3. Add to the hospital's tenant Inventory collection
+                            try {
+                                invItem = await Inventory.create({
+                                    hospitalId: targetHospitalId,
+                                    name: medName.trim(),
+                                    salt: item.saltName ? item.saltName.trim() : '',
+                                    category: 'General',
+                                    stock: 100,
+                                    unit: 'Tablets',
+                                    buyingPrice: 0,
+                                    sellingPrice: 10,
+                                    vendor: 'Auto-Added',
+                                    batchNumber: 'AUTO',
+                                    expiryDate: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000),
+                                    purchaseDate: new Date(),
+                                    status: 'In Stock'
+                                });
+                                console.log(`[Prescription] Auto-added medicine "${medName}" to inventory of hospital ${targetHospitalId}`);
+                            } catch (err) {
+                                console.error('[Prescription] Error auto-adding to inventory:', err);
+                            }
+                        }
+                    }
+                }
             }
         }
 
         await appointment.save();
+
+        if (req.tenantDb) {
+            try {
+                const updateData = {
+                    requestReportFollowUp: appointment.requestReportFollowUp,
+                    followUpScheduled: appointment.followUpScheduled,
+                    status: appointment.status,
+                    diagnosis: appointment.diagnosis,
+                    doctorNotes: appointment.doctorNotes,
+                    labTests: appointment.labTests,
+                    dietPlan: appointment.dietPlan,
+                    pharmacy: appointment.pharmacy,
+                    prescription: appointment.prescription,
+                    prescriptions: appointment.prescriptions,
+                    completedAt: appointment.completedAt,
+                    completedBy: appointment.completedBy
+                };
+                await MasterAppointment.findByIdAndUpdate(appointment._id, { $set: updateData });
+            } catch (syncErr) {
+                console.error('[doctor] Master DB appointment sync failed:', syncErr.message);
+            }
+        }
 
         // Retrieve patient details reliably
         let pId = appointment.patientId;
@@ -477,7 +601,6 @@ router.patch('/appointments/:id/prescription', verifyToken, upload.single('presc
                 pName = pUser.name || pName;
             }
         }
-
         if (appointment.labTests && appointment.labTests.length > 0) {
             const existingReport = await LabReport.findOne({ appointmentId: appointment._id });
             let reportId;
@@ -648,6 +771,23 @@ router.patch('/appointments/:id/prescription', verifyToken, upload.single('presc
             }
         }
 
+        const io = req.app.get('io');
+        if (io) {
+            const payload = {
+                referenceType: 'ClinicalVisit',
+                message: `Consultation completed/updated for patient ${pName}`,
+                referenceId: appointment._id
+            };
+            io.to('receptionist').emit('new_notification', payload);
+            io.to('reception').emit('new_notification', payload);
+
+            const hId = req.user.hospitalId || appointment.hospitalId;
+            if (hId) {
+                const hospRoom = `hospital_${hId}`;
+                io.to(`${hospRoom}_receptionist`).to(`${hospRoom}_reception`).emit('new_notification', payload);
+            }
+        }
+
         res.json({ success: true, message: 'Saved', appointment });
     } catch (error) {
         res.status(500).json({ success: false, message: 'Update failed' });
@@ -655,8 +795,9 @@ router.patch('/appointments/:id/prescription', verifyToken, upload.single('presc
 });
 
 // 7. GET Patient History
-router.get('/patients/:patientId/history', verifyToken, async (req, res) => {
+router.get('/patients/:patientId/history', verifyToken, resolveTenant, async (req, res) => {
     try {
+        const { Appointment } = getModels(req);
         const histQuery = { userId: req.params.patientId };
         if (req.user.hospitalId) histQuery.hospitalId = req.user.hospitalId;
         const history = await Appointment.find(histQuery).sort({ appointmentDate: -1 });
@@ -671,7 +812,8 @@ router.get('/labs-list', verifyToken, async (req, res) => {
     const labs = await Lab.find(labQuery).select('name _id');
     res.json({ success: true, labs });
 });
-router.get('/medicines-list', verifyToken, async (req, res) => {
+router.get('/medicines-list', verifyToken, resolveTenant, async (req, res) => {
+    const { Inventory } = getModels(req);
     const medQuery = { stock: { $gt: 0 } };
     if (req.user.hospitalId) medQuery.hospitalId = req.user.hospitalId;
     const medicines = await Inventory.find(medQuery).select('name category stock');
@@ -684,10 +826,20 @@ router.get('/:doctorId/booked-slots', async (req, res) => {
         status: { $ne: 'cancelled' }
     };
     // Hospital isolation: only show slots for this hospital's doctor
+    let AppointmentModel = MasterAppointment;
     if (req.query.hospitalId) {
         query.hospitalId = req.query.hospitalId;
+        try {
+            const { getTenantConnection } = require('../db/tenantDb');
+            const tenantDb = await getTenantConnection(String(req.query.hospitalId));
+            if (tenantDb) {
+                AppointmentModel = getTenantModels(tenantDb).Appointment;
+            }
+        } catch (err) {
+            console.error('[booked-slots] Tenant DB connection failed:', err);
+        }
     }
-    const appointments = await Appointment.find(query);
+    const appointments = await AppointmentModel.find(query);
     res.json({ success: true, bookedSlots: appointments.map(app => app.appointmentTime) });
 });
 
@@ -707,10 +859,11 @@ router.get('/clinic-patients/:clinicPatientId/reports', verifyToken, async (req,
 });
 
 // POST /appointments/:id/recommend-admission
-router.post('/appointments/:id/recommend-admission', verifyToken, async (req, res) => {
+router.post('/appointments/:id/recommend-admission', verifyToken, resolveTenant, async (req, res) => {
     try {
         const { notes, priority, requestedDepartment } = req.body;
         const appointmentId = req.params.id;
+        const { Appointment, User } = getModels(req);
 
         const findQuery = { _id: appointmentId };
         if (req.user.hospitalId) findQuery.hospitalId = req.user.hospitalId;
@@ -833,6 +986,13 @@ router.post('/appointments/:id/recommend-admission', verifyToken, async (req, re
             io.to('reception').emit('admission_created', populatedAdmission);
             io.to('receptionist').emit('new_notification', notif);
             io.to('reception').emit('new_notification', notif);
+
+            const hId = req.user.hospitalId || appointment.hospitalId;
+            if (hId) {
+                const hospRoom = `hospital_${hId}`;
+                io.to(`${hospRoom}_receptionist`).to(`${hospRoom}_reception`).emit('admission_created', populatedAdmission);
+                io.to(`${hospRoom}_receptionist`).to(`${hospRoom}_reception`).emit('new_notification', notif);
+            }
         }
 
         res.json({ success: true, message: 'Admission recommended successfully', appointment, admission: existingAdmission });
@@ -843,9 +1003,10 @@ router.post('/appointments/:id/recommend-admission', verifyToken, async (req, re
 });
 
 // DELETE /appointments/:id/recommend-admission
-router.delete('/appointments/:id/recommend-admission', verifyToken, async (req, res) => {
+router.delete('/appointments/:id/recommend-admission', verifyToken, resolveTenant, async (req, res) => {
     try {
         const appointmentId = req.params.id;
+        const { Appointment, User } = getModels(req);
 
         const findQuery = { _id: appointmentId };
         if (req.user.hospitalId) findQuery.hospitalId = req.user.hospitalId;
@@ -927,6 +1088,13 @@ router.delete('/appointments/:id/recommend-admission', verifyToken, async (req, 
             io.to('reception').emit('admission_discharged', { appointmentId: appointment._id });
             io.to('receptionist').emit('new_notification', notif);
             io.to('reception').emit('new_notification', notif);
+
+            const hId = req.user.hospitalId || appointment.hospitalId;
+            if (hId) {
+                const hospRoom = `hospital_${hId}`;
+                io.to(`${hospRoom}_receptionist`).to(`${hospRoom}_reception`).emit('admission_discharged', { appointmentId: appointment._id });
+                io.to(`${hospRoom}_receptionist`).to(`${hospRoom}_reception`).emit('new_notification', notif);
+            }
         }
 
         res.json({ success: true, message: 'Admission recommendation cancelled successfully', appointment });

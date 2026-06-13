@@ -128,10 +128,10 @@ const CentralAdminDashboard = () => {
         fetchClinics();
     }, []);
 
-    // Handle navigation state from SystemRevenueDashboard "Manage Plan" button
+    // Handle navigation state from other views (e.g. choosing custom tabs)
     useEffect(() => {
-        if (location.state?.openTab === 'revenue-plans') {
-            setActiveTab('revenue-plans');
+        if (location.state?.openTab) {
+            setActiveTab(location.state.openTab);
         }
     }, [location.state]);
 

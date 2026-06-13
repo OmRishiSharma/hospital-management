@@ -16,6 +16,7 @@ const PERMISSION_NAV_MAP = {
     appointment_view_all: { label: 'All Appointments', path: '/reception/dashboard' },
     lab_view: { label: 'Lab Dashboard', path: '/lab/dashboard' },
     lab_manage: { label: 'Lab Tests', path: '/lab/tests' },
+    lab_reports_view: { label: 'Lab Reports', path: '/lab/completed' },
     pharmacy_view: { label: 'Pharmacy', path: '/pharmacy/inventory' },
     pharmacy_manage: { label: 'Pharmacy Orders', path: '/pharmacy/orders' },
     // Admin

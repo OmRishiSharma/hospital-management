@@ -17,7 +17,7 @@ const getIconForPath = (path, label) => {
     if (text.includes('admin') || text.includes('manage')) return '⚙️';
     if (text.includes('role') || text.includes('permission')) return '🔑';
     if (text.includes('service')) return '🛠️';
-    if (text.includes('billing') || text.includes('payment')) return '💳';
+    if (text.includes('billing') || text.includes('payment') || text.includes('refund')) return '💳';
     if (text.includes('user') || text.includes('staff')) return '👥';
     if (text.includes('setting')) return '⚙️';
     return '📋';
@@ -39,6 +39,7 @@ const getDescForLink = (label) => {
     if (text.includes('role')) return 'Manage roles and permissions';
     if (text.includes('service')) return 'Configure hospital services';
     if (text.includes('staff') || text.includes('user')) return 'Manage staff accounts';
+    if (text.includes('refund')) return 'Access Refunds';
     return `Access ${label}`;
 };
 
@@ -52,9 +53,76 @@ const RoleDashboard = () => {
         return <Navigate to="/admin" replace />;
     }
 
+    // Receptionist goes directly to the Reception Dashboard (skip welcome screen)
+    const rawNavLinks = user.navLinks || [];
+    const hasReceptionLink = rawNavLinks.some(l => String(l.path || '').includes('reception/dashboard'));
+    if (role === 'reception' || role === 'receptionist' || role === 'receptiondeskmanager' || hasReceptionLink) {
+        return <Navigate to="/reception/dashboard" replace />;
+    }
+
+    // Process and self-heal navLinks for billing roles to guarantee Refunds link works
+    let navLinks = [...rawNavLinks];
+    const billingRoles = ['cashier', 'billing', 'billing executive', 'billing manager', 'senior billing officer'];
+    const isBillingRole = billingRoles.includes(role) || user.permissions?.includes('billing_view');
+
+    if (isBillingRole) {
+        let standardBillingLinks = [];
+        if (role === 'accountant') {
+            standardBillingLinks = [
+                { label: 'Dashboard', path: '/billing/dashboard' },
+                { label: 'Revenue Reports', path: '/billing/reports' },
+                { label: 'Billing Analytics', path: '/billing/analytics' },
+                { label: 'Invoice Templates', path: '/billing/templates' },
+                { label: 'Settings', path: '/billing/settings' }
+            ];
+        } else {
+            standardBillingLinks = [
+                { label: 'Dashboard', path: '/billing/dashboard' },
+                { label: 'Patient Billing', path: '/billing/patient' },
+                { label: 'Pending Payments', path: '/billing/pending' },
+                { label: 'Invoices', path: '/billing/invoices' },
+                { label: 'Payment Collection', path: '/billing/collect' },
+                { label: 'Payment History', path: '/billing/history' },
+                { label: 'Refunds', path: '/billing/refunds' },
+                { label: 'Invoice Templates', path: '/billing/templates' },
+                { label: 'Settings', path: '/billing/settings' }
+            ];
+        }
+
+        const mergedLinks = [...navLinks];
+        standardBillingLinks.forEach(std => {
+            const existingIdx = mergedLinks.findIndex(link => 
+                link.label === std.label || 
+                link.path === std.path || 
+                (link.label === 'Refunds' && link.path === '/billing/log-out')
+            );
+            if (existingIdx !== -1) {
+                // Correct path if it was incorrect (e.g. log-out typo)
+                if (mergedLinks[existingIdx].path !== std.path) {
+                    mergedLinks[existingIdx] = { ...mergedLinks[existingIdx], path: std.path };
+                }
+            } else {
+                mergedLinks.push(std);
+            }
+        });
+        navLinks = mergedLinks;
+    }
+
+    if (role === 'accountant') {
+        navLinks = navLinks.filter(l => 
+            !['patient billing', 'pending payments', 'invoices', 'payment collection', 'payment history', 'refunds', 'bed management', 'bed management desk', 'hospital operations center', 'operations center'].includes(l.label?.toLowerCase()) &&
+            !l.label?.toLowerCase().includes('role') && 
+            !l.path?.toLowerCase().includes('roles')
+        );
+    } else if (billingRoles.includes(role) || role === 'reception' || role === 'receptionist') {
+        navLinks = navLinks.filter(l => 
+            !['revenue reports', 'billing analytics'].includes(l.label?.toLowerCase())
+        );
+    }
+
     const userName = user.name || 'Staff';
     const roleName = user.role || 'Staff';
-    const navLinks = user.navLinks || [];
+
     const permissions = user.permissions || [];
 
     // Get time-based greeting

@@ -5,12 +5,16 @@ import '../administration/SuperAdmin.css';
 
 const Admin = () => {
     const navigate = useNavigate();
+    const user = JSON.parse(localStorage.getItem('user') || '{}');
+    const isCentral = ['superadmin', 'centraladmin'].includes((user.role || '').toLowerCase());
+
     const [error, setError] = useState('');
     const [success, setSuccess] = useState('');
     const [users, setUsers] = useState([]);
     const [loadingUsers, setLoadingUsers] = useState(false);
     const [roles, setRoles] = useState([]);
     const [hospital, setHospital] = useState(null);
+    const [hospitals, setHospitals] = useState([]);
 
     const [editModal, setEditModal] = useState(false);
     const [editForm, setEditForm] = useState({
@@ -26,13 +30,12 @@ const Admin = () => {
     // Create Staff Form state
     const [showCreateForm, setShowCreateForm] = useState(false);
     const [createForm, setCreateForm] = useState({
-        name: '', email: '', password: '', phone: '', roleId: '', file: null, department: ''
+        name: '', email: '', password: '', phone: '', roleId: '', file: null, department: '', hospitalId: ''
     });
     const [creating, setCreating] = useState(false);
 
     // Check if user is admin
     useEffect(() => {
-        const user = JSON.parse(localStorage.getItem('user') || '{}');
         const perms = user.permissions || [];
         const allowedRoles = ['admin', 'superadmin', 'centraladmin', 'hospitaladmin'];
         const role = (user.role || '').toLowerCase();
@@ -40,13 +43,27 @@ const Admin = () => {
             !perms.includes('*') && !perms.includes('admin_manage_roles') && !perms.includes('admin_view_stats')) {
             navigate('/');
         }
-    }, [navigate]);
+    }, [navigate, user]);
 
     useEffect(() => {
         fetchUsers();
         fetchRoles();
         fetchHospital();
+        if (isCentral) {
+            fetchHospitals();
+        }
     }, []);
+
+    const fetchHospitals = async () => {
+        try {
+            const res = await hospitalAPI.getHospitals();
+            if (res.success && res.hospitals) {
+                setHospitals(res.hospitals);
+            }
+        } catch (err) {
+            console.error('Error fetching hospitals:', err);
+        }
+    };
 
     const fetchHospital = async () => {
         try {
@@ -180,6 +197,12 @@ const Admin = () => {
             return;
         }
 
+        if (isCentral && !createForm.hospitalId) {
+            setError('Please select a hospital.');
+            setCreating(false);
+            return;
+        }
+
         try {
             let avatarUrl = null;
 
@@ -205,7 +228,7 @@ const Admin = () => {
             const response = await adminAPI.createUser(userData);
             if (response.success) {
                 setSuccess(`✅ ${response.user?.role || 'Staff'} account created! They can log in with: ${createForm.email}`);
-                setCreateForm({ name: '', email: '', password: '', phone: '', roleId: '', file: null, department: '' });
+                setCreateForm({ name: '', email: '', password: '', phone: '', roleId: '', file: null, department: '', hospitalId: '' });
                 setShowCreateForm(false);
                 fetchUsers();
             }
@@ -266,7 +289,19 @@ const Admin = () => {
         navigate('/');
     };
 
-    const user = JSON.parse(localStorage.getItem('user') || '{}');
+    const filteredRoles = roles.filter(role => {
+        const nameLower = role.name.toLowerCase();
+        if (nameLower === 'patient' || nameLower === 'user') return false;
+        
+        if (isCentral) {
+            if (!createForm.hospitalId) return !role.hospitalId;
+            return !role.hospitalId || String(role.hospitalId) === String(createForm.hospitalId);
+        }
+        return true;
+    });
+
+    const selectedHospital = hospitals.find(h => String(h._id) === String(createForm.hospitalId));
+    const departmentsList = isCentral ? (selectedHospital?.departments || []) : (hospital?.departments || []);
 
     return (
         <div className="superadmin-page">
@@ -275,7 +310,14 @@ const Admin = () => {
                 <div className="admin-header">
                     <div>
                         <button
-                            onClick={() => navigate('/admin')}
+                            onClick={() => {
+                                const role = (user.role || '').toLowerCase();
+                                if (role === 'superadmin' || role === 'centraladmin') {
+                                    navigate('/supremeadmin');
+                                } else {
+                                    navigate('/admin');
+                                }
+                            }}
                             style={{ background: 'none', border: 'none', color: '#64748b', cursor: 'pointer', fontSize: '14px', padding: '0 0 8px', display: 'flex', alignItems: 'center', gap: '4px' }}
                         >
                             ← Back to Dashboard
@@ -314,71 +356,92 @@ const Admin = () => {
 
                     {showCreateForm && (
                         <form onSubmit={handleCreateStaff} className="user-form">
-                            <div className="form-row">
-                                <div className="form-group">
-                                    <label className="staff-label">Full Name *</label>
-                                    <input type="text" placeholder="e.g. Dr. Sharma" value={createForm.name} onChange={e => setCreateForm({ ...createForm, name: e.target.value })} required className="staff-input" />
-                                </div>
-                                <div className="form-group">
-                                    <label className="staff-label">Email Address *</label>
-                                    <input type="email" placeholder="e.g. dr.sharma@hospital.com" value={createForm.email} onChange={e => setCreateForm({ ...createForm, email: e.target.value })} required className="staff-input" />
-                                </div>
-                            </div>
+                                {isCentral && (
+                                    <div className="form-row" style={{ marginBottom: '16px' }}>
+                                        <div className="form-group" style={{ gridColumn: '1 / -1' }}>
+                                            <label className="staff-label">Select Hospital *</label>
+                                            <select
+                                                value={createForm.hospitalId}
+                                                onChange={e => setCreateForm({ ...createForm, hospitalId: e.target.value, roleId: '', department: '' })}
+                                                required
+                                                className="staff-input"
+                                            >
+                                                <option value="">-- Select a Hospital --</option>
+                                                {hospitals.map(h => (
+                                                    <option key={h._id} value={h._id}>
+                                                        {h.name} {h.city ? `(${h.city})` : ''}
+                                                    </option>
+                                                ))}
+                                            </select>
+                                        </div>
+                                    </div>
+                                )}
 
-                            <div className="form-row">
-                                <div className="form-group">
-                                    <label className="staff-label">Password *</label>
-                                    <input type="text" placeholder="Set a temporary password" value={createForm.password} onChange={e => setCreateForm({ ...createForm, password: e.target.value })} required className="staff-input" />
-                                    <small className="form-hint">Share this password with the staff member</small>
+                                <div className="form-row">
+                                    <div className="form-group">
+                                        <label className="staff-label">Full Name *</label>
+                                        <input type="text" placeholder="e.g. Dr. Sharma" value={createForm.name} onChange={e => setCreateForm({ ...createForm, name: e.target.value })} required className="staff-input" />
+                                    </div>
+                                    <div className="form-group">
+                                        <label className="staff-label">Email Address *</label>
+                                        <input type="email" placeholder="e.g. dr.sharma@hospital.com" value={createForm.email} onChange={e => setCreateForm({ ...createForm, email: e.target.value })} required className="staff-input" />
+                                    </div>
                                 </div>
-                                <div className="form-group">
-                                    <label className="staff-label">Phone Number</label>
-                                    <input type="text" placeholder="e.g. 9876543210" value={createForm.phone} onChange={e => setCreateForm({ ...createForm, phone: e.target.value.replace(/\D/g, '').slice(0, 10) })} maxLength={10} className="staff-input" />
-                                </div>
-                            </div>
 
-                            <div className="form-row">
-                                <div className="form-group">
-                                    <label className="staff-label">Profile Image</label>
-                                    <input
-                                        type="file"
-                                        accept="image/*"
-                                        onChange={e => setCreateForm({ ...createForm, file: e.target.files[0] })}
-                                        className="staff-input"
-                                        style={{ padding: '10px' }}
-                                    />
+                                <div className="form-row">
+                                    <div className="form-group">
+                                        <label className="staff-label">Password *</label>
+                                        <input type="text" placeholder="Set a temporary password" value={createForm.password} onChange={e => setCreateForm({ ...createForm, password: e.target.value })} required className="staff-input" />
+                                        <small className="form-hint">Share this password with the staff member</small>
+                                    </div>
+                                    <div className="form-group">
+                                        <label className="staff-label">Phone Number</label>
+                                        <input type="text" placeholder="e.g. 9876543210" value={createForm.phone} onChange={e => setCreateForm({ ...createForm, phone: e.target.value.replace(/\D/g, '').slice(0, 10) })} maxLength={10} className="staff-input" />
+                                    </div>
                                 </div>
-                                <div className="form-group">
-                                    <label className="staff-label">Assign Role * <span style={{ fontWeight: 400, color: '#94a3b8', fontSize: '0.85rem', textTransform: 'none' }}>(Don't see your role? <a href="/admin/roles" style={{ color: '#0ea5e9' }}>Create one here</a>)</span></label>
-                                    <select value={createForm.roleId} onChange={e => setCreateForm({ ...createForm, roleId: e.target.value })} required className="staff-input">
-                                        <option value="">-- Select a Role --</option>
-                                        {roles.filter(r => !['patient', 'user'].includes(r.name.toLowerCase())).map(role => (
-                                            <option key={role._id} value={role._id}>
-                                                {role.name} {role.description ? `— ${role.description}` : ''}
-                                            </option>
-                                        ))}
-                                    </select>
-                                </div>
-                            </div>
-                            
-                            {hospital && hospital.departments && hospital.departments.length > 0 && (
-                                <div className="form-row" style={{ marginTop: '10px' }}>
-                                    <div className="form-group" style={{ gridColumn: '1 / -1' }}>
-                                        <label className="staff-label">Assign Department (Optional - Leave blank to allow all)</label>
-                                        <select
-                                            value={createForm.department}
-                                            onChange={(e) => setCreateForm(prev => ({ ...prev, department: e.target.value }))}
+
+                                <div className="form-row">
+                                    <div className="form-group">
+                                        <label className="staff-label">Profile Image</label>
+                                        <input
+                                            type="file"
+                                            accept="image/*"
+                                            onChange={e => setCreateForm({ ...createForm, file: e.target.files[0] })}
                                             className="staff-input"
-                                            style={{ marginTop: '8px' }}
-                                        >
-                                            <option value="">-- Select Department --</option>
-                                            {hospital.departments.map(dept => (
-                                                <option key={dept} value={dept}>{dept}</option>
+                                            style={{ padding: '10px' }}
+                                        />
+                                    </div>
+                                    <div className="form-group">
+                                        <label className="staff-label">Assign Role * <span style={{ fontWeight: 400, color: '#94a3b8', fontSize: '0.85rem', textTransform: 'none' }}>(Don't see your role? <a href="/admin/roles" style={{ color: '#0ea5e9' }}>Create one here</a>)</span></label>
+                                        <select value={createForm.roleId} onChange={e => setCreateForm({ ...createForm, roleId: e.target.value })} required className="staff-input">
+                                            <option value="">-- Select a Role --</option>
+                                            {filteredRoles.map(role => (
+                                                <option key={role._id} value={role._id}>
+                                                    {role.name} {role.description ? `— ${role.description}` : ''}
+                                                </option>
                                             ))}
                                         </select>
                                     </div>
                                 </div>
-                            )}
+                                
+                                {departmentsList && departmentsList.length > 0 && (
+                                    <div className="form-row" style={{ marginTop: '10px' }}>
+                                        <div className="form-group" style={{ gridColumn: '1 / -1' }}>
+                                            <label className="staff-label">Assign Department (Optional - Leave blank to allow all)</label>
+                                            <select
+                                                value={createForm.department}
+                                                onChange={(e) => setCreateForm(prev => ({ ...prev, department: e.target.value }))}
+                                                className="staff-input"
+                                                style={{ marginTop: '8px' }}
+                                            >
+                                                <option value="">-- Select Department --</option>
+                                                {departmentsList.map(dept => (
+                                                    <option key={dept} value={dept}>{dept}</option>
+                                                ))}
+                                            </select>
+                                        </div>
+                                    </div>
+                                )}
 
                             <button type="submit" disabled={creating} className="submit-button" style={{ marginTop: '20px' }}>
                                 {creating ? 'Creating Account...' : '✅ Create Staff Account'}
@@ -414,6 +477,7 @@ const Admin = () => {
                                         <th>Avatar</th>
                                         <th>Name</th>
                                         <th>Email</th>
+                                        {isCentral && <th>Hospital</th>}
                                         <th>Role</th>
                                         <th>Phone</th>
                                         <th>Status</th>
@@ -449,6 +513,11 @@ const Admin = () => {
                                                 </td>
                                                 <td>{userItem.name}</td>
                                                 <td>{userItem.email}</td>
+                                                {isCentral && (
+                                                    <td>
+                                                        {hospitals.find(h => String(h._id) === String(userItem.hospitalId))?.name || 'Central / Platform'}
+                                                    </td>
+                                                )}
                                                 <td>
                                                     <span className={`role-badge role-${(userItem.role || '').toLowerCase()}`}>
                                                         {(userItem.role || 'No Role').toUpperCase()}

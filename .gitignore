@@ -1,4 +1,4 @@
-﻿################################################################################
+################################################################################
 # This .gitignore file was automatically created by Microsoft(R) Visual Studio.
 ################################################################################
 
@@ -9,3 +9,33 @@
 /.vs/crm.slnx/v18/DocumentLayout.json
 /.vs/slnx.sqlite
 /.vs/VSWorkspaceState.json
+
+# Dependencies & Environments
+node_modules/
+.env
+.env.local
+*.env*
+
+# Temporary/Scratch files
+deleted_blocks.txt
+diff.txt
+diff_reception.txt
+login.json
+git_log.txt
+
+# Scratch and local test scripts
+server/check-*.js
+server/check_*.js
+server/inspect_*.js
+server/dump_*.js
+server/list_dbs.js
+server/persistence_verify.js
+server/scratch/
+server/test-*.js
+server/test_*.js
+server/trigger_*.js
+server/uploads/
+server/verify_*.js
+client/src/pages/billing/replaceScript.cjs
+
+

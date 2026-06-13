@@ -42,11 +42,8 @@ const defaultRoles = [
         description: 'Hospital superadmin with full management access',
         permissions: [
             'admin_manage_roles', 'admin_view_stats',
-            'patient_search', 'patient_create', 'patient_view', 'patient_edit',
-            'appointment_view_all', 'appointment_manage',
-            'lab_view', 'lab_manage',
-            'pharmacy_view', 'pharmacy_manage',
-            'visit_intake', 'visit_diagnose', 'clinical_history_view'
+            'patient_search', 'patient_view', 'patient_edit',
+            'visit_intake', 'clinical_history_view'
         ],
         dashboardPath: '/admin',
         navLinks: [

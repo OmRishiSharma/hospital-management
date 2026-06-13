@@ -1,17 +1,17 @@
 /**
- * Seed Default Roles into MongoDB
- * 
- * Run: node seed-roles.js
- * 
- * This creates the default roles so the system works out of the box.
- * Admins can still create additional custom roles via the UI.
- */
+				 * seed-hospital-roles.js — Database migration script
+				 *
+				 * Seeds and synchronizes the 9 default roles (Admin, Doctor, Lab Technician, Pharmacist,
+				 * Receptionist, Patient, Accountant, Billing, Administrator) for all hospitals in the system.
+				 */
 
 require('dotenv').config();
 const mongoose = require('mongoose');
-const Role = require('./src/models/role.model');
-
-const DB_URI = process.env.MONGODB_URI || process.env.MONGO_URI || 'mongodb://localhost:27017/crm';
+const Hospital = require('../src/models/hospital.model');
+const Role = require('../src/models/role.model');
+const { getTenantConnection } = require('../src/db/tenantDb');
+const { getTenantModels } = require('../src/db/tenantModels');
+const { syncToTenant } = require('../src/utils/tenantSync');
 
 const defaultRoles = [
     {
@@ -33,7 +33,7 @@ const defaultRoles = [
             { label: 'Services', path: '/admin/services' },
             { label: 'Roles', path: '/admin/roles' }
         ],
-        isSystemRole: true
+        isSystemRole: false
     },
     {
         name: 'Doctor',
@@ -46,7 +46,7 @@ const defaultRoles = [
         navLinks: [
             { label: 'Patients', path: '/doctor/patients' }
         ],
-        isSystemRole: true
+        isSystemRole: false
     },
     {
         name: 'Lab Technician',
@@ -58,7 +58,7 @@ const defaultRoles = [
         navLinks: [
             { label: 'Dashboard', path: '/lab/dashboard' }
         ],
-        isSystemRole: true
+        isSystemRole: false
     },
     {
         name: 'Pharmacist',
@@ -71,7 +71,7 @@ const defaultRoles = [
             { label: 'Inventory', path: '/pharmacy/inventory' },
             { label: 'Orders', path: '/pharmacy/orders' }
         ],
-        isSystemRole: true
+        isSystemRole: false
     },
     {
         name: 'Receptionist',
@@ -85,7 +85,7 @@ const defaultRoles = [
         navLinks: [
             { label: 'Dashboard', path: '/reception/dashboard' }
         ],
-        isSystemRole: true
+        isSystemRole: false
     },
     {
         name: 'Patient',
@@ -101,7 +101,7 @@ const defaultRoles = [
             { label: 'Lab Reports', path: '/lab-reports' },
             { label: 'Dashboard', path: '/dashboard' }
         ],
-        isSystemRole: true
+        isSystemRole: false
     },
     {
         name: 'Accountant',
@@ -115,7 +115,7 @@ const defaultRoles = [
             { label: 'Finance Dashboard', path: '/accountant/dashboard' },
             { label: 'Patient Billing', path: '/cashier/billing' }
         ],
-        isSystemRole: true
+        isSystemRole: false
     },
     {
         name: 'Billing',
@@ -139,7 +139,7 @@ const defaultRoles = [
             { label: 'Invoice Templates', path: '/billing/templates' },
             { label: 'Settings', path: '/billing/settings' }
         ],
-        isSystemRole: true
+        isSystemRole: false
     },
     {
         name: 'Administrator',
@@ -174,38 +174,51 @@ const defaultRoles = [
             { label: 'Settings', path: '/administrator/settings' },
             { label: 'Profile Settings', path: '/administrator/profile-settings' }
         ],
-        isSystemRole: true
+        isSystemRole: false
     }
 ];
 
-async function seedRoles() {
-    try {
-        await mongoose.connect(DB_URI);
-        console.log('✅ Connected to MongoDB');
+async function seedDefaultRolesForHospital(hospitalId) {
+    for (const roleData of defaultRoles) {
+        let role = await Role.findOne({ name: roleData.name, hospitalId });
+        if (!role) {
+            role = await Role.create({
+                ...roleData,
+                hospitalId,
+                isSystemRole: false
+            });
+            console.log(`  [Master DB] Created default role: "${roleData.name}"`);
+        } else {
+            console.log(`  [Master DB] Role "${roleData.name}" already exists`);
+        }
+        // Sync to tenant DB
+        await syncToTenant('Role', role, 'save', hospitalId);
+    }
+}
 
-        for (const roleData of defaultRoles) {
-            // Use compound key: name + hospitalId (null = global role)
-            const existing = await Role.findOne({ name: roleData.name, hospitalId: null });
-            if (existing) {
-                Object.assign(existing, roleData);
-                await existing.save();
-                console.log(`🔄 Updated role: ${roleData.name}`);
-            } else {
-                await Role.create({ ...roleData, hospitalId: null });
-                console.log(`✅ Created role: ${roleData.name}`);
-            }
+async function run() {
+    try {
+        const DB_URI = process.env.MONGODB_URL || 'mongodb+srv://omrishisharma:1234@cluster0.fkmafvw.mongodb.net/HSM';
+        console.log('Connecting to Master MongoDB...');
+        await mongoose.connect(DB_URI);
+        console.log('Connected to Master DB successfully!');
+
+        const hospitals = await Hospital.find({});
+        console.log(`Found ${hospitals.length} hospitals. Starting roles sync...\n`);
+
+        for (const hosp of hospitals) {
+            console.log(`🏥 Processing hospital: "${hosp.name}" (ID: ${hosp._id})`);
+            await seedDefaultRolesForHospital(hosp._id);
+            console.log(`✅ Roles seeded and synced successfully for hospital: "${hosp.name}"\n`);
         }
 
-        console.log('\n🎉 All default roles seeded successfully!');
-        console.log('You can now assign these roles to users via the Central Admin dashboard.');
-
+        console.log('🎉 Seeding and synchronization migration complete!');
         await mongoose.disconnect();
         process.exit(0);
-    } catch (error) {
-        console.error('❌ Error seeding roles:', error);
-        await mongoose.disconnect();
+    } catch (err) {
+        console.error('Migration failed with error:', err);
         process.exit(1);
     }
 }
 
-seedRoles();
+run();

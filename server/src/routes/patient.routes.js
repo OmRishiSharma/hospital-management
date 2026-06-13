@@ -40,8 +40,8 @@ router.get('/:id/full-history', verifyToken, resolveTenant, auditLog('VIEW_PATIE
         const userId = req.params.id;
         const roleData = req.user._roleData;
 
-        const allowedRoles = ['doctor', 'nurse', 'superadmin', 'admin', 'reception', 'lab', 'pharmacy', 'centraladmin', 'hospitaladmin'];
-        const userRole = (req.user.role || '').toLowerCase();
+        const allowedRoles = ['doctor', 'nurse', 'superadmin', 'admin', 'reception', 'receptionist', 'lab', 'pharmacy', 'centraladmin', 'hospitaladmin'];
+        const userRole = typeof req.user.role === 'string' ? req.user.role.toLowerCase() : '';
         const dynRole = (roleData?.name || '').toLowerCase();
         
         // Ensure that explicit permissions are checked instead of just strictly hardcoded names
@@ -58,11 +58,26 @@ router.get('/:id/full-history', verifyToken, resolveTenant, auditLog('VIEW_PATIE
 
         const isRestrictedRole = ['pharmacy', 'lab'].includes((roleData?.name || '').toLowerCase());
 
-        // All clinical data is stored in master DB — hospitalId filter provides hospital isolation
-        const ClinicalVisit = require('../models/clinicalVisit.model');
-        const LabReport = require('../models/labReport.model');
-        const PharmacyOrder = require('../models/pharmacyOrder.model');
-        const Appointment = require('../models/appointment.model');
+        const { getTenantModels } = require('../db/tenantModels');
+        const getModels = (r) => {
+            if (r.tenantDb) {
+                const m = getTenantModels(r.tenantDb);
+                return {
+                    ClinicalVisit: m.ClinicalVisit,
+                    LabReport: m.LabReport,
+                    PharmacyOrder: m.PharmacyOrder,
+                    Appointment: m.Appointment
+                };
+            }
+            return {
+                ClinicalVisit: require('../models/clinicalVisit.model'),
+                LabReport: require('../models/labReport.model'),
+                PharmacyOrder: require('../models/pharmacyOrder.model'),
+                Appointment: require('../models/appointment.model')
+            };
+        };
+
+        const { ClinicalVisit, LabReport, PharmacyOrder, Appointment } = getModels(req);
 
         const mongoose = require('mongoose');
         const isObjectId = mongoose.Types.ObjectId.isValid(userId) && userId.length === 24;
@@ -89,7 +104,7 @@ router.get('/:id/full-history', verifyToken, resolveTenant, auditLog('VIEW_PATIE
         const hFilter = hid ? { hospitalId: hid } : {};
 
         const [visits, labs, pharmacies, appointments] = await Promise.all([
-            ClinicalVisit.find({ $or: [{ patientId: realUserId }, { patientId: patientIdStr }], ...hFilter }).lean(),
+            ClinicalVisit.find({ patientId: realUserId, ...hFilter }).lean(),
             LabReport.find({ userId: realUserId, ...hFilter }).lean(),
             PharmacyOrder.find({ userId: realUserId, ...hFilter }).lean(),
             Appointment.find({ $or: [{ userId: realUserId }, { patientId: patientIdStr }], ...hFilter }).lean()

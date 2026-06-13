@@ -126,11 +126,19 @@ async function seedTenantBilling() {
 
                 return {
                     _id: order._id,
-                    patientId: order.userId,
+                    appointmentId: order.appointmentId,
+                    patientId: order.patientId || String(order.userId),
+                    userId: order.userId,
+                    doctorId: order.doctorId,
                     items: (order.items || []).map(item => ({
-                        name: item.medicineName || item.name,
-                        qty: item.quantity || item.qty || 1,
-                        price: item.price
+                        medicineName: item.medicineName || item.name,
+                        frequency: item.frequency,
+                        duration: item.duration,
+                        price: item.price,
+                        purchased: item.purchased,
+                        unitPrice: item.unitPrice,
+                        quantity: item.quantity || item.qty || 1,
+                        totalPrice: item.totalPrice
                     })),
                     totalAmount: order.totalAmount,
                     paymentStatus: pStatus,
@@ -176,8 +184,8 @@ async function seedTenantBilling() {
             { type: 'Pharmacy', name: 'Pharmacy Dispensed Medicines (Antibiotics + Analgesics)', fee: 320 },
             { type: 'Pharmacy', name: 'Pharmacy Dispensed Medicines (Antidiabetics)', fee: 240 },
             { type: 'Pharmacy', name: 'Pharmacy Dispensed Medicines (Cardiac Beta-blockers)', fee: 480 },
-            { type: 'Facility', name: 'Facility Usage: Oxygen Concentrator Therapy (1 day)', fee: 1200 },
-            { type: 'Facility', name: 'Facility Usage: Physiotherapy Session (2 days)', fee: 900 }
+            { type: 'Admission', name: 'Facility Usage: Oxygen Concentrator Therapy (1 day)', fee: 1200 },
+            { type: 'Admission', name: 'Facility Usage: Physiotherapy Session (2 days)', fee: 900 }
         ];
 
         const paymentMethods = ['Cash', 'Card', 'UPI', 'Bank Transfer'];

@@ -5,6 +5,10 @@ import { useAppDispatch, useAuth, useAppointments, useCachedServices, useCachedD
 import { fetchAppointments, createAppointment } from '../../store/slices/appointmentSlice';
 import { fetchServices, fetchDoctors, fetchBookedSlots } from '../../store/slices/publicDataSlice';
 import { useSelector } from 'react-redux';
+import { receptionAPI, hospitalAPI, admissionAPI } from '../../utils/api';
+import { getSubdomain } from '../../utils/subdomain';
+import jsPDF from 'jspdf';
+import autoTable from 'jspdf-autotable';
 import './Appointment.css';
 
 // Base available time slots
@@ -398,6 +402,20 @@ const Appointment = () => {
     );
   }
 
+  const role = (user?.role || '').toLowerCase();
+  const isStaff = ['receptionist', 'reception', 'admin', 'hospitaladmin'].includes(role);
+
+  if (isStaff) {
+    return (
+      <StaffAppointmentManager
+        user={user}
+        servicesData={servicesData}
+        doctorsData={doctorsData}
+        navigate={navigate}
+      />
+    );
+  }
+
   return (
     <div className="appointment-page">
       <div className="content-wrapper">
@@ -723,6 +741,1289 @@ const Appointment = () => {
             </div>
         </div>
       )}
+    </div>
+  );
+};
+
+// ==========================================
+// STAFF APPOINTMENT BOOKING & QUEUE MANAGER
+// ==========================================
+const StaffAppointmentManager = ({ user, servicesData, doctorsData, navigate }) => {
+  const [activeTab, setActiveTab] = useState('list'); // 'list' or 'book'
+  const [parentAppointmentId, setParentAppointmentId] = useState(null);
+
+  // Appointment List State
+  const [appointments, setAppointments] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  const handleScheduleFollowUp = (appt) => {
+    const patient = appt.userId || {
+      name: appt.patientName || '',
+      phone: appt.patientPhone || '',
+      email: appt.patientEmail || '',
+      _id: appt.userId || appt.patientId
+    };
+    setSelectedPatient(patient);
+    
+    const doctorId = appt.doctorId?._id || appt.doctorId;
+    const serviceId = appt.serviceId || '';
+    const defaultFee = appt.amount || '';
+    
+    setBookingForm({
+      serviceId: serviceId,
+      doctorId: doctorId,
+      appointmentDate: new Date().toISOString().split('T')[0],
+      appointmentTime: '',
+      amount: defaultFee,
+      paymentMethod: 'Cash',
+      paymentStatus: 'Paid',
+      notes: 'Report Review Follow-up'
+    });
+    
+    setParentAppointmentId(appt._id);
+    setActiveTab('book');
+  };
+
+  // Hospital, Admissions & Hospitalize states
+  const [hospitalContext, setHospitalContext] = useState(null);
+  const [admissions, setAdmissions] = useState([]);
+  const [hospitalizeModal, setHospitalizeModal] = useState({ open: false, appointment: null });
+  const [hospitalizeForm, setHospitalizeForm] = useState({ ward: '', bedNumber: '', admissionDate: new Date().toISOString().split('T')[0], notes: '', facilityDays: {} });
+  const [hospitalizingSaving, setHospitalizingSaving] = useState(false);
+
+  const fetchHospital = async () => {
+    try {
+      const sub = getSubdomain();
+      const res = await hospitalAPI.resolveHospital(sub);
+      if (res.success) setHospitalContext(res.hospital);
+    } catch (err) { console.error('Error fetching hospital context:', err); }
+  };
+
+  const fetchAdmissions = async () => {
+    try {
+      const res = await admissionAPI.getActiveAdmissions();
+      if (res.success) setAdmissions(res.admissions || []);
+    } catch (err) { console.error(err); }
+  };
+
+  useEffect(() => {
+    fetchHospital();
+    fetchAdmissions();
+  }, []);
+
+  // Filters
+  const [searchQuery, setSearchQuery] = useState('');
+  const [dateFilter, setDateFilter] = useState(() => {
+    const d = new Date();
+    const offset = d.getTimezoneOffset();
+    const localDate = new Date(d.getTime() - (offset * 60 * 1000));
+    return localDate.toISOString().split('T')[0];
+  });
+  const [doctorFilter, setDoctorFilter] = useState('');
+  const [statusFilter, setStatusFilter] = useState('all');
+
+  // Booking Form State
+  const [selectedPatient, setSelectedPatient] = useState(null);
+  const [patientSearch, setPatientSearch] = useState('');
+  const [patientResults, setPatientResults] = useState([]);
+  const [patientSearchLoading, setPatientSearchLoading] = useState(false);
+  const [showWalkInForm, setShowWalkInForm] = useState(false);
+  
+  const [walkInForm, setWalkInForm] = useState({
+    name: '',
+    email: '',
+    phone: ''
+  });
+  const [registering, setRegistering] = useState(false);
+  const [quickReportFile, setQuickReportFile] = useState(null);
+  const [quickReportName, setQuickReportName] = useState('');
+
+  const [bookingForm, setBookingForm] = useState({
+    serviceId: '',
+    doctorId: '',
+    appointmentDate: new Date().toISOString().split('T')[0],
+    appointmentTime: '',
+    amount: '',
+    paymentMethod: 'Cash',
+    paymentStatus: 'Paid',
+    notes: ''
+  });
+
+  const [bookedSlots, setBookedSlots] = useState([]);
+  const [availableTimes, setAvailableTimes] = useState([]);
+
+  // Modals
+  const [rescheduleModal, setRescheduleModal] = useState({ open: false, appointment: null });
+  const [rescheduleForm, setRescheduleForm] = useState({ date: '', time: '' });
+  const [rescheduleBookedSlots, setRescheduleBookedSlots] = useState([]);
+  const [rescheduleAvailableTimes, setRescheduleAvailableTimes] = useState([]);
+  const [collectPaymentModal, setCollectPaymentModal] = useState({ open: false, appointment: null });
+  const [collectPaymentForm, setCollectPaymentForm] = useState({ method: 'Cash', amount: '' });
+
+  // Load appointments
+  const fetchAllAppointments = async () => {
+    setLoading(true);
+    try {
+      const res = await receptionAPI.getAllAppointments('', false, true);
+      if (res.success) {
+        setAppointments(res.appointments || []);
+      }
+    } catch (err) {
+      console.error(err);
+      setError('Failed to fetch appointments queue.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchAllAppointments();
+  }, []);
+
+  // Search Patient
+  useEffect(() => {
+    if (patientSearch.trim().length < 2) {
+      setPatientResults([]);
+      return;
+    }
+    const delayDebounce = setTimeout(async () => {
+      setPatientSearchLoading(true);
+      try {
+        const res = await receptionAPI.searchPatients(patientSearch);
+        if (res.success) {
+          setPatientResults(res.patients || []);
+        }
+      } catch (err) {
+        console.error(err);
+      } finally {
+        setPatientSearchLoading(false);
+      }
+    }, 400);
+
+    return () => clearTimeout(delayDebounce);
+  }, [patientSearch]);
+
+  // Load booked slots when doctor or date changes in booking form
+  useEffect(() => {
+    const fetchSlots = async () => {
+      if (bookingForm.doctorId && bookingForm.appointmentDate) {
+        try {
+          const res = await receptionAPI.getBookedSlots(bookingForm.doctorId, bookingForm.appointmentDate);
+          if (res.success) {
+            setBookedSlots(res.bookedSlots || []);
+          }
+        } catch (err) {
+          console.error(err);
+        }
+      }
+    };
+    fetchSlots();
+  }, [bookingForm.doctorId, bookingForm.appointmentDate]);
+
+  // Load booked slots when rescheduling doctor/date changes
+  useEffect(() => {
+    const fetchSlots = async () => {
+      if (rescheduleModal.appointment && rescheduleForm.date) {
+        try {
+          const res = await receptionAPI.getBookedSlots(rescheduleModal.appointment.doctorId?._id, rescheduleForm.date);
+          if (res.success) {
+            setRescheduleBookedSlots(res.bookedSlots || []);
+          }
+        } catch (err) {
+          console.error(err);
+        }
+      }
+    };
+    fetchSlots();
+  }, [rescheduleModal.appointment, rescheduleForm.date]);
+
+  // Available times logic for Booking
+  useEffect(() => {
+    const baseTimes = [
+      '09:00', '09:30', '10:00', '10:30', '11:00', '11:30',
+      '12:00', '12:30', '14:00', '14:30', '15:00', '15:30',
+      '16:00', '16:30', '17:00', '17:30'
+    ];
+    let times = baseTimes.filter(t => !bookedSlots.includes(t));
+
+    // Filter out past times if the date is today
+    if (bookingForm.appointmentDate) {
+      const selectedDateObj = new Date(bookingForm.appointmentDate);
+      selectedDateObj.setHours(0,0,0,0);
+      const today = new Date();
+      today.setHours(0,0,0,0);
+      
+      if (selectedDateObj.getTime() === today.getTime()) {
+        const now = new Date();
+        const currentHour = now.getHours();
+        const currentMinute = now.getMinutes();
+        const currentTimeInMinutes = currentHour * 60 + currentMinute;
+        
+        times = times.filter(time => {
+          const [hours, minutes] = time.split(':').map(Number);
+          const timeInMinutes = hours * 60 + minutes;
+          // Slot must be after the current time
+          return timeInMinutes >= currentTimeInMinutes;
+        });
+      }
+    }
+
+    if (bookingForm.doctorId && doctorsData.length > 0) {
+      const doctor = doctorsData.find(d => d._id === bookingForm.doctorId);
+      if (doctor && doctor.availability) {
+        const dateObj = new Date(bookingForm.appointmentDate);
+        const days = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+        const dayName = days[dateObj.getDay()];
+        const schedule = doctor.availability[dayName];
+        if (schedule && schedule.available === false) {
+          setAvailableTimes([]);
+          return;
+        }
+        if (schedule && schedule.startTime && schedule.endTime) {
+          const getMin = (t) => {
+            const [h, m] = t.split(':').map(Number);
+            return h * 60 + m;
+          };
+          const start = getMin(schedule.startTime);
+          const end = getMin(schedule.endTime);
+          times = times.filter(t => {
+            const m = getMin(t);
+            return m >= start && m < end;
+          });
+        }
+      }
+    }
+    setAvailableTimes(times);
+  }, [bookingForm.appointmentDate, bookingForm.doctorId, bookedSlots, doctorsData]);
+
+  // Available times logic for Rescheduling
+  useEffect(() => {
+    if (!rescheduleForm.date || !rescheduleModal.appointment) return;
+    const baseTimes = [
+      '09:00', '09:30', '10:00', '10:30', '11:00', '11:30',
+      '12:00', '12:30', '14:00', '14:30', '15:00', '15:30',
+      '16:00', '16:30', '17:00', '17:30'
+    ];
+    let times = baseTimes.filter(t => !rescheduleBookedSlots.includes(t));
+
+    // Filter out past times if the date is today
+    if (rescheduleForm.date) {
+      const selectedDateObj = new Date(rescheduleForm.date);
+      selectedDateObj.setHours(0,0,0,0);
+      const today = new Date();
+      today.setHours(0,0,0,0);
+      
+      if (selectedDateObj.getTime() === today.getTime()) {
+        const now = new Date();
+        const currentHour = now.getHours();
+        const currentMinute = now.getMinutes();
+        const currentTimeInMinutes = currentHour * 60 + currentMinute;
+        
+        times = times.filter(time => {
+          const [hours, minutes] = time.split(':').map(Number);
+          const timeInMinutes = hours * 60 + minutes;
+          return timeInMinutes >= currentTimeInMinutes;
+        });
+      }
+    }
+
+    const doctorId = rescheduleModal.appointment.doctorId?._id;
+    if (doctorId && doctorsData.length > 0) {
+      const doctor = doctorsData.find(d => d._id === doctorId);
+      if (doctor && doctor.availability) {
+        const dateObj = new Date(rescheduleForm.date);
+        const days = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+        const dayName = days[dateObj.getDay()];
+        const schedule = doctor.availability[dayName];
+        if (schedule && schedule.available === false) {
+          setRescheduleAvailableTimes([]);
+          return;
+        }
+        if (schedule && schedule.startTime && schedule.endTime) {
+          const getMin = (t) => {
+            const [h, m] = t.split(':').map(Number);
+            return h * 60 + m;
+          };
+          const start = getMin(schedule.startTime);
+          const end = getMin(schedule.endTime);
+          times = times.filter(t => {
+            const m = getMin(t);
+            return m >= start && m < end;
+          });
+        }
+      }
+    }
+    setRescheduleAvailableTimes(times);
+  }, [rescheduleForm.date, rescheduleBookedSlots, rescheduleModal.appointment, doctorsData]);
+
+  const handleServiceChange = (serviceId) => {
+    const selectedService = servicesData.find(s => s._id === serviceId || s.id === serviceId);
+    let amount = selectedService?.price || 0;
+    setBookingForm(prev => {
+      // If a doctor is already selected, keep the doctor's fee, otherwise use service fee
+      const doc = prev.doctorId ? doctorsData.find(d => d._id === prev.doctorId) : null;
+      const finalAmount = doc ? (doc.consultationFee || 0) : amount;
+      return {
+        ...prev,
+        serviceId,
+        amount: finalAmount
+      };
+    });
+  };
+
+  const handleDoctorChange = (doctorId) => {
+    const doc = doctorsData.find(d => d._id === doctorId);
+    let fee = doc?.consultationFee || 0; // fallback to 0 instead of empty string
+    setBookingForm(prev => ({
+      ...prev,
+      doctorId,
+      amount: fee
+    }));
+  };
+
+  const handleQuickRegister = async (e) => {
+    e.preventDefault();
+    if (!walkInForm.name || !walkInForm.phone) {
+      alert('Name and Phone number are required.');
+      return;
+    }
+    setRegistering(true);
+    try {
+      const res = await receptionAPI.registerPatient({ ...walkInForm, autoCreateAppointment: false });
+      if (res.success) {
+        // Upload past report if selected
+        if (quickReportFile) {
+          try {
+            await receptionAPI.uploadPastReport(res.user._id, quickReportFile, quickReportName);
+          } catch (uploadErr) {
+            console.error("Failed to upload past report for walk-in", uploadErr);
+          }
+        }
+        setSelectedPatient(res.user);
+        setShowWalkInForm(false);
+        setWalkInForm({ name: '', email: '', phone: '' });
+        setQuickReportFile(null);
+        setQuickReportName('');
+        setPatientSearch('');
+      } else {
+        alert(res.message || 'Failed to register patient.');
+      }
+    } catch (err) {
+      console.error(err);
+      alert(err.response?.data?.message || 'Error registering walk-in patient.');
+    } finally {
+      setRegistering(false);
+    }
+  };
+
+  const handleBookAppointment = async (e) => {
+    e.preventDefault();
+    if (!selectedPatient) {
+      alert('Please select or register a patient first.');
+      return;
+    }
+    if (!bookingForm.doctorId || !bookingForm.appointmentDate || !bookingForm.appointmentTime) {
+      alert('Doctor, Date, and Time Slot are required.');
+      return;
+    }
+
+    try {
+      const payload = {
+        patientId: selectedPatient._id,
+        doctorId: bookingForm.doctorId,
+        date: bookingForm.appointmentDate,
+        time: bookingForm.appointmentTime,
+        notes: bookingForm.notes || 'Walk-in booking',
+        paymentMethod: bookingForm.paymentMethod,
+        paymentStatus: bookingForm.paymentStatus,
+        amount: bookingForm.amount,
+        parentAppointmentId: parentAppointmentId
+      };
+
+      const res = await receptionAPI.bookAppointment(payload);
+      if (res.success) {
+        alert('Appointment booked successfully!');
+        setSelectedPatient(null);
+        setParentAppointmentId(null);
+        setBookingForm({
+          serviceId: '',
+          doctorId: '',
+          appointmentDate: new Date().toISOString().split('T')[0],
+          appointmentTime: '',
+          amount: '',
+          paymentMethod: 'Cash',
+          paymentStatus: 'Paid',
+          notes: ''
+        });
+        fetchAllAppointments();
+        setActiveTab('list');
+      } else {
+        alert(res.message || 'Booking failed.');
+      }
+    } catch (err) {
+      console.error(err);
+      alert(err.response?.data?.message || 'Error booking appointment.');
+    }
+  };
+
+  const handleCheckIn = async (appt) => {
+    if (window.confirm(`Check in ${appt.userId?.name || 'patient'} for their visit?`)) {
+      try {
+        const res = await receptionAPI.checkIn({
+          patientId: appt.userId?._id,
+          appointmentId: appt._id
+        });
+        if (res.success) {
+          alert('Patient checked in successfully! Directed to doctor queue.');
+          fetchAllAppointments();
+        } else {
+          alert(res.message || 'Check-in failed.');
+        }
+      } catch (err) {
+        console.error(err);
+        alert('Error during patient check-in.');
+      }
+    }
+  };
+
+  const handleCancelAppt = async (id) => {
+    if (window.confirm('Are you sure you want to cancel this appointment?')) {
+      try {
+        const res = await receptionAPI.cancelAppointment(id);
+        if (res.success) {
+          alert('Appointment cancelled successfully.');
+          fetchAllAppointments();
+        } else {
+          alert(res.message || 'Cancellation failed.');
+        }
+      } catch (err) {
+        console.error(err);
+        alert('Error cancelling appointment.');
+      }
+    }
+  };
+
+  const submitReschedule = async (e) => {
+    e.preventDefault();
+    if (!rescheduleForm.date || !rescheduleForm.time) {
+      alert('Please select both date and time.');
+      return;
+    }
+    try {
+      const res = await receptionAPI.rescheduleAppointment(
+        rescheduleModal.appointment._id,
+        rescheduleForm.date,
+        rescheduleForm.time
+      );
+      if (res.success) {
+        alert('Appointment rescheduled successfully.');
+        setRescheduleModal({ open: false, appointment: null });
+        fetchAllAppointments();
+      } else {
+        alert(res.message || 'Reschedule failed.');
+      }
+    } catch (err) {
+      console.error(err);
+      alert('Error rescheduling appointment.');
+    }
+  };
+
+  const submitCollectPayment = async (e) => {
+    e.preventDefault();
+    try {
+      const res = await receptionAPI.confirmPayment(
+        collectPaymentModal.appointment._id,
+        collectPaymentForm.method,
+        collectPaymentForm.amount
+      );
+      if (res.success) {
+        alert('Payment marked as paid successfully!');
+        setCollectPaymentModal({ open: false, appointment: null });
+        fetchAllAppointments();
+      } else {
+        alert(res.message || 'Payment update failed.');
+      }
+    } catch (err) {
+      console.error(err);
+      alert('Error updating payment status.');
+    }
+  };
+
+  const openHospitalizeModal = (apt) => {
+    setHospitalizeForm({
+      ward: '',
+      bedNumber: '',
+      admissionDate: new Date().toISOString().split('T')[0],
+      notes: apt.recommendAdmissionNotes ? `Doctor Recommendation: ${apt.recommendAdmissionNotes}` : '',
+      facilityDays: {}
+    });
+    setHospitalizeModal({ open: true, appointment: apt });
+  };
+
+  const handleHospitalize = async () => {
+    const { appointment } = hospitalizeModal;
+    const facilities = hospitalContext?.facilities || [];
+    const selectedFacilities = facilities
+      .filter(f => hospitalizeForm.facilityDays[f.name] > 0)
+      .map(f => ({
+        facilityName: f.name,
+        pricePerDay: f.pricePerDay,
+        days: Number(hospitalizeForm.facilityDays[f.name]),
+        totalAmount: f.pricePerDay * Number(hospitalizeForm.facilityDays[f.name]),
+      }));
+
+    setHospitalizingSaving(true);
+    try {
+      const patientUser = appointment.userId || appointment.patientData || {};
+      const patientName = patientUser.name ||
+        [patientUser.firstName, patientUser.lastName].filter(Boolean).join(' ') ||
+        appointment.patientName || '';
+      const patientPhone = patientUser.phone || appointment.patientPhone || '';
+
+      await admissionAPI.createAdmission({
+        patientId: appointment.userId?._id || appointment.patientId,
+        patientName,
+        patientPhone,
+        appointmentId: appointment._id,
+        ward: hospitalizeForm.ward,
+        bedNumber: hospitalizeForm.bedNumber,
+        admissionDate: hospitalizeForm.admissionDate,
+        notes: hospitalizeForm.notes,
+        selectedFacilities,
+      });
+      setHospitalizeModal({ open: false, appointment: null });
+      fetchAdmissions();
+      fetchAllAppointments();
+    } catch (err) {
+      alert(err.response?.data?.message || 'Failed to admit patient');
+    } finally {
+      setHospitalizingSaving(false);
+    }
+  };
+
+  const generateReceiptPDF = (apt, paymentMethodOverride) => {
+    const doc = new jsPDF();
+    const hName = hospitalContext?.name || 'HOSPITAL';
+    const hAddr = [hospitalContext?.address, hospitalContext?.city, hospitalContext?.state].filter(Boolean).join(', ');
+    const hPhone = hospitalContext?.phone || '';
+    const hEmail = hospitalContext?.email || '';
+    const issuedBy = user?.name || 'Reception Staff';
+    let y = 18;
+
+    doc.setFontSize(18); doc.setFont('helvetica', 'bold'); doc.setTextColor(0);
+    doc.text(hName, 105, y, { align: 'center' }); y += 7;
+    if (hAddr) {
+      doc.setFontSize(9); doc.setFont('helvetica', 'normal'); doc.setTextColor(100);
+      doc.text(hAddr, 105, y, { align: 'center' }); y += 5;
+    }
+    if (hPhone || hEmail) {
+      const contact = [hPhone && `Ph: ${hPhone}`, hEmail && `Email: ${hEmail}`].filter(Boolean).join('  |  ');
+      doc.setFontSize(9); doc.setTextColor(100);
+      doc.text(contact, 105, y, { align: 'center' }); y += 5;
+    }
+    doc.setFontSize(12); doc.setFont('helvetica', 'bold'); doc.setTextColor(41, 128, 185);
+    doc.text('Consultation Receipt', 105, y, { align: 'center' }); y += 5;
+    doc.setDrawColor(41, 128, 185); doc.setLineWidth(0.5);
+    doc.line(14, y, 196, y); y += 8;
+    doc.setTextColor(0); doc.setFont('helvetica', 'normal');
+
+    const isToken = apt.tokenNumber != null;
+    const dateDisplay = new Date(apt.appointmentDate).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
+
+    autoTable(doc, {
+      startY: y,
+      body: [
+        ['Patient Name', apt.userId?.name || 'Walk-in'],
+        ['MRN / ID', apt.userId?.patientId || apt.patientId || 'N/A'],
+        ['Phone', apt.userId?.phone || '-'],
+        ['Doctor', `Dr. ${apt.doctorName || '-'}`],
+        isToken
+          ? ['Date / Token', `${dateDisplay}  —  Token #${apt.tokenNumber}`]
+          : ['Date & Time', `${dateDisplay} @ ${apt.appointmentTime || '-'}`],
+        ['Service', apt.serviceName || 'Walk-in Visit'],
+        ['Consultation Fee', `Rs. ${Number(apt.amount || 0).toLocaleString('en-IN')}`],
+        ['Payment Method', paymentMethodOverride || apt.paymentMethod || 'Cash'],
+        ['Payment Status', 'PAID ✓'],
+      ],
+      theme: 'grid',
+      columnStyles: { 0: { fontStyle: 'bold', cellWidth: 52 } },
+      bodyStyles: { fontSize: 10 },
+      alternateRowStyles: { fillColor: [245, 249, 255] },
+    });
+
+    y = doc.lastAutoTable.finalY + 10;
+    doc.setDrawColor(200); doc.line(14, y, 196, y); y += 6;
+    doc.setFontSize(8); doc.setTextColor(120);
+    doc.text(`Issued by: ${issuedBy}`, 14, y);
+    doc.text(`Generated: ${new Date().toLocaleString('en-IN')}`, 196, y, { align: 'right' });
+    y += 5;
+    doc.text(`Thank you for choosing ${hName}`, 105, y, { align: 'center' });
+    const pid = apt.userId?.patientId || apt.patientId || 'Patient';
+    if (window.confirm("Do you want to download the Receipt PDF?")) {
+      doc.save(`Receipt_${pid}.pdf`);
+    }
+  };
+
+  const filteredAppointments = appointments.filter(appt => {
+    const patientName = (appt.userId?.name || '').toLowerCase();
+    const patientPhone = (appt.userId?.phone || '').toLowerCase();
+    const patientId = (appt.patientId || '').toLowerCase();
+    const doctorName = (appt.doctorName || '').toLowerCase();
+    const sf = searchQuery.toLowerCase();
+    
+    if (searchQuery && 
+        !patientName.includes(sf) && 
+        !patientPhone.includes(sf) && 
+        !patientId.includes(sf) && 
+        !doctorName.includes(sf)) {
+      return false;
+    }
+
+    if (statusFilter === 'report_follow_up') {
+      if (!appt.requestReportFollowUp || appt.followUpScheduled) {
+        return false;
+      }
+    } else {
+      if (dateFilter && appt.appointmentDate?.split('T')[0] !== dateFilter) {
+        return false;
+      }
+
+      if (statusFilter !== 'all' && appt.status !== statusFilter) {
+        return false;
+      }
+    }
+
+    if (doctorFilter && appt.doctorId?._id !== doctorFilter) {
+      return false;
+    }
+
+    return true;
+  });
+
+  return (
+    <div style={{ padding: '24px', maxWidth: '1400px', margin: '0 auto', fontFamily: 'Inter, sans-serif' }}>
+      
+      {/* HEADER SECTION */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' }}>
+        <div>
+          <h1 style={{ fontSize: '1.8rem', fontWeight: 800, color: '#0A2647', margin: 0 }}>Appointments Center</h1>
+          <p style={{ fontSize: '0.9rem', color: '#64748B', margin: '4px 0 0' }}>Book and manage patient appointments for the hospital.</p>
+        </div>
+        
+        {/* Navigation Tabs */}
+        <div style={{ display: 'flex', background: '#E2E8F0', padding: '4px', borderRadius: '10px', gap: '4px' }}>
+          <button 
+            onClick={() => setActiveTab('list')}
+            style={{ 
+              padding: '10px 20px', 
+              fontSize: '0.9rem', 
+              fontWeight: 600, 
+              border: 'none', 
+              borderRadius: '8px', 
+              cursor: 'pointer',
+              background: activeTab === 'list' ? '#0A2647' : 'transparent',
+              color: activeTab === 'list' ? '#fff' : '#475569',
+              transition: 'all 0.2s'
+            }}
+          >
+            📋 Appointment Queue
+          </button>
+          <button 
+            onClick={() => navigate('/reception/dashboard', { state: { openIntake: true } })}
+            style={{ 
+              padding: '10px 20px', 
+              fontSize: '0.9rem', 
+              fontWeight: 600, 
+              border: 'none', 
+              borderRadius: '8px', 
+              cursor: 'pointer',
+              background: activeTab === 'book' ? '#0A2647' : 'transparent',
+              color: activeTab === 'book' ? '#fff' : '#475569',
+              transition: 'all 0.2s'
+            }}
+          >
+            ➕ Book Appointment
+          </button>
+        </div>
+      </div>
+
+      {activeTab === 'list' && (
+        // ==========================================
+        // VIEW QUEUE TAB
+        // ==========================================
+        <div style={{ background: '#fff', borderRadius: '16px', border: '1px solid #E2E8F0', padding: '24px', boxShadow: '0 4px 6px -1px rgba(0,0,0,0.05)' }}>
+          
+          {/* Filters Bar */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '16px', marginBottom: '24px' }}>
+            <div>
+              <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 700, color: '#475569', marginBottom: '6px', textTransform: 'uppercase' }}>Search Patient / Doctor</label>
+              <input 
+                type="text" 
+                placeholder="Name, Phone, MRN..." 
+                value={searchQuery}
+                onChange={e => setSearchQuery(e.target.value)}
+                style={{ width: '100%', padding: '10px 14px', border: '1.5px solid #CBD5E1', borderRadius: '8px', fontSize: '0.9rem', outline: 'none' }}
+              />
+            </div>
+
+            <div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
+                <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 700, color: '#475569', textTransform: 'uppercase', margin: 0 }}>Appointment Date</label>
+                {dateFilter && (
+                  <button 
+                    onClick={() => setDateFilter('')}
+                    style={{ background: 'none', border: 'none', color: '#ef4444', fontSize: '0.75rem', fontWeight: 600, cursor: 'pointer', padding: 0 }}
+                  >
+                    Clear Filter
+                  </button>
+                )}
+              </div>
+              <input 
+                type="date" 
+                value={dateFilter}
+                onChange={e => setDateFilter(e.target.value)}
+                style={{ width: '100%', padding: '10px 14px', border: '1.5px solid #CBD5E1', borderRadius: '8px', fontSize: '0.9rem', outline: 'none' }}
+              />
+            </div>
+
+            <div>
+              <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 700, color: '#475569', marginBottom: '6px', textTransform: 'uppercase' }}>Filter by Doctor</label>
+              <select 
+                value={doctorFilter}
+                onChange={e => setDoctorFilter(e.target.value)}
+                style={{ width: '100%', padding: '10px 14px', border: '1.5px solid #CBD5E1', borderRadius: '8px', fontSize: '0.9rem', outline: 'none', background: '#fff' }}
+              >
+                <option value="">All Doctors</option>
+                {doctorsData.map(d => <option key={d._id} value={d._id}>{d.name}</option>)}
+              </select>
+            </div>
+
+            <div>
+              <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 700, color: '#475569', marginBottom: '6px', textTransform: 'uppercase' }}>Status</label>
+              <select 
+                value={statusFilter}
+                onChange={e => setStatusFilter(e.target.value)}
+                style={{ width: '100%', padding: '10px 14px', border: '1.5px solid #CBD5E1', borderRadius: '8px', fontSize: '0.9rem', outline: 'none', background: '#fff' }}
+              >
+                <option value="all">All Statuses</option>
+                <option value="pending">Pending</option>
+                <option value="confirmed">Confirmed</option>
+                <option value="completed">Completed</option>
+                <option value="cancelled">Cancelled</option>
+                <option value="report_follow_up">Report Follow-ups 📝</option>
+              </select>
+            </div>
+          </div>
+
+          {/* Queue Table */}
+          {loading ? (
+            <div style={{ textAlign: 'center', padding: '40px', color: '#64748B' }}>
+              <div className="loading-spinner" style={{ margin: '0 auto 12px' }}></div>
+              <p>Loading appointments queue...</p>
+            </div>
+          ) : filteredAppointments.length === 0 ? (
+            <div style={{ textAlign: 'center', padding: '60px 20px', background: '#F8FAFC', borderRadius: '12px', color: '#64748B' }}>
+              <span style={{ fontSize: '3rem' }}>📅</span>
+              <h3 style={{ margin: '16px 0 8px', color: '#0A2647' }}>No Appointments Found</h3>
+              <p style={{ margin: 0 }}>Try clearing your search query or filters.</p>
+            </div>
+          ) : (
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left' }}>
+                <thead>
+                  <tr style={{ background: '#F8FAFC', borderBottom: '2px solid #E2E8F0' }}>
+                    <th style={{ padding: '14px 16px', fontWeight: 700, color: '#475569', fontSize: '0.85rem' }}>Token / Time</th>
+                    <th style={{ padding: '14px 16px', fontWeight: 700, color: '#475569', fontSize: '0.85rem' }}>Patient Details</th>
+                    <th style={{ padding: '14px 16px', fontWeight: 700, color: '#475569', fontSize: '0.85rem' }}>Doctor / Service</th>
+                    <th style={{ padding: '14px 16px', fontWeight: 700, color: '#475569', fontSize: '0.85rem' }}>Billing</th>
+                    <th style={{ padding: '14px 16px', fontWeight: 700, color: '#475569', fontSize: '0.85rem' }}>Status</th>
+                    <th style={{ padding: '14px 16px', fontWeight: 700, color: '#475569', fontSize: '0.85rem', textAlign: 'right' }}>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredAppointments.map(appt => {
+                    const isPaid = (appt.paymentStatus || '').toLowerCase() === 'paid';
+                    const isCancelled = appt.status === 'cancelled';
+                    const isCompleted = appt.status === 'completed';
+                    const isCurrentlyAdmitted = admissions.some(adm => (adm.appointmentId?._id || adm.appointmentId) === appt._id && (adm.status === 'Admitted' || adm.status === 'Pending Allocation'));
+                    
+                    return (
+                      <tr key={appt._id} style={{ borderBottom: '1px solid #F1F5F9', transition: 'all 0.2s' }}>
+                        <td style={{ padding: '16px' }}>
+                          <div style={{ fontWeight: 700, color: '#0A2647' }}>
+                            {appt.tokenNumber ? `Token #${appt.tokenNumber}` : appt.appointmentTime || '--:--'}
+                          </div>
+                          <div style={{ fontSize: '0.75rem', color: '#64748B', marginTop: '2px' }}>
+                            {new Date(appt.appointmentDate).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}
+                          </div>
+                        </td>
+                        <td style={{ padding: '16px' }}>
+                          <div style={{ fontWeight: 700, color: '#1E293B' }}>{appt.userId?.name || 'Walk-in'}</div>
+                          <div style={{ fontSize: '0.8rem', color: '#64748B', display: 'flex', gap: '8px', marginTop: '2px' }}>
+                            <span>MRN: {appt.patientId || appt.userId?.patientId || '-'}</span>
+                            <span>•</span>
+                            <span>📞 {appt.userId?.phone || appt.phone || '-'}</span>
+                          </div>
+                        </td>
+                        <td style={{ padding: '16px' }}>
+                          <div style={{ fontWeight: 600, color: '#0A2647' }}>{appt.doctorName}</div>
+                          <div style={{ fontSize: '0.8rem', color: '#64748B', marginTop: '2px' }}>{appt.serviceName || 'Consultation'}</div>
+                        </td>
+                        <td style={{ padding: '16px' }}>
+                          <div style={{ fontWeight: 700, color: '#1E293B' }}>₹{appt.amount || 0}</div>
+                          <div style={{ marginTop: '4px' }}>
+                            <span style={{ 
+                              padding: '2px 8px', 
+                              borderRadius: '4px', 
+                              fontSize: '0.7rem', 
+                              fontWeight: 700,
+                              background: isPaid ? '#ECFDF5' : '#FEF2F2',
+                              color: isPaid ? '#059669' : '#DC2626'
+                            }}>
+                              {isPaid ? 'PAID' : 'PENDING'}
+                            </span>
+                          </div>
+                        </td>
+                        <td style={{ padding: '16px' }}>
+                          <span style={{ 
+                            padding: '4px 10px', 
+                            borderRadius: '20px', 
+                            fontSize: '0.75rem', 
+                            fontWeight: 700,
+                            background: 
+                              appt.status === 'confirmed' ? '#ECFDF5' : 
+                              appt.status === 'pending' ? '#FFFBEB' : 
+                              appt.status === 'completed' ? '#EFF6FF' : '#FEF2F2',
+                            color: 
+                              appt.status === 'confirmed' ? '#059669' : 
+                              appt.status === 'pending' ? '#D97706' : 
+                              appt.status === 'completed' ? '#1D4ED8' : '#DC2626'
+                          }}>
+                            {appt.status?.toUpperCase()}
+                          </span>
+                        </td>
+                        <td style={{ padding: '16px', textAlign: 'right' }}>
+                          <div style={{ display: 'flex', gap: '6px', justifyContent: 'flex-end', alignItems: 'center', whiteSpace: 'nowrap' }}>
+                            {statusFilter === 'report_follow_up' ? (
+                              <button 
+                                onClick={() => handleScheduleFollowUp(appt)}
+                                style={{ 
+                                  padding: '8px 14px', 
+                                  fontSize: '0.78rem', 
+                                  fontWeight: 700, 
+                                  background: '#8b5cf6', 
+                                  color: '#fff', 
+                                  border: 'none', 
+                                  borderRadius: '6px', 
+                                  cursor: 'pointer',
+                                  boxShadow: '0 2px 4px rgba(139, 92, 246, 0.2)'
+                                }}
+                              >
+                                📅 Schedule Follow-up
+                              </button>
+                            ) : (
+                              <>
+                                {appt.requestReportFollowUp && !appt.followUpScheduled && (
+                                  <button 
+                                    onClick={() => handleScheduleFollowUp(appt)}
+                                    style={{ 
+                                      padding: '6px 10px', 
+                                      fontSize: '0.75rem', 
+                                      fontWeight: 700, 
+                                      background: '#8b5cf6', 
+                                      color: '#fff', 
+                                      border: 'none', 
+                                      borderRadius: '6px', 
+                                      cursor: 'pointer',
+                                      boxShadow: '0 2px 4px rgba(139, 92, 246, 0.1)'
+                                    }}
+                                  >
+                                    📅 Schedule Follow-up
+                                  </button>
+                                )}
+                                <button 
+                                  onClick={() => {
+                                    const pid = appt.userId?._id || appt.userId || appt.patientId;
+                                    if (pid) navigate(`/patient/${pid}`);
+                                  }}
+                                  style={{ 
+                                    padding: '6px 10px', 
+                                    fontSize: '0.75rem', 
+                                    fontWeight: 600, 
+                                    background: 'rgba(59, 130, 246, 0.1)', 
+                                    color: '#3b82f6', 
+                                    border: '1px solid #3b82f6', 
+                                    borderRadius: '6px', 
+                                    cursor: 'pointer',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: '4px'
+                                  }}
+                                >
+                                  👁 Profile
+                                </button>
+                                {appt.checkedIn ? (
+                                  <span style={{
+                                    padding: '4px 10px', borderRadius: '20px', fontSize: '0.75rem', fontWeight: 700,
+                                    background: '#ECFDF5', color: '#059669', border: '1px solid #A7F3D0'
+                                  }}>
+                                    ✓ Checked In
+                                  </span>
+                                ) : (
+                                  !isCancelled && !isCompleted && (
+                                    <button 
+                                      onClick={() => handleCheckIn(appt)}
+                                      style={{ padding: '6px 10px', fontSize: '0.75rem', fontWeight: 600, background: '#EFF6FF', color: '#1D4ED8', border: '1px solid #BFDBFE', borderRadius: '6px', cursor: 'pointer' }}
+                                      title="Check in patient for vitals/intake queue"
+                                    >
+                                      Check In
+                                    </button>
+                                  )
+                                )}
+                                {!appt.checkedIn && !isCancelled && !isCompleted && (
+                                  <button 
+                                    onClick={() => {
+                                      setRescheduleForm({ date: appt.appointmentDate?.split('T')[0], time: appt.appointmentTime });
+                                      setRescheduleModal({ open: true, appointment: appt });
+                                    }}
+                                    style={{ padding: '6px 10px', fontSize: '0.75rem', fontWeight: 600, background: '#FFFBEB', color: '#D97706', border: '1px solid #FDE68A', borderRadius: '6px', cursor: 'pointer' }}
+                                  >
+                                    Reschedule
+                                  </button>
+                                )}
+                                {!isPaid && !isCancelled && (
+                                  <button 
+                                    onClick={() => {
+                                      setCollectPaymentForm({ amount: appt.amount, method: 'Cash' });
+                                      setCollectPaymentModal({ open: true, appointment: appt });
+                                    }}
+                                    style={{ padding: '6px 10px', fontSize: '0.75rem', fontWeight: 600, background: '#ECFDF5', color: '#059669', border: '1px solid #A7F3D0', borderRadius: '6px', cursor: 'pointer' }}
+                                  >
+                                    Mark Paid
+                                  </button>
+                                )}
+                                {isPaid && (
+                                  <button 
+                                    onClick={() => generateReceiptPDF(appt)}
+                                    style={{ padding: '6px 10px', fontSize: '0.75rem', fontWeight: 600, background: '#EFF6FF', color: '#1D4ED8', border: '1px solid #BFDBFE', borderRadius: '6px', cursor: 'pointer' }}
+                                  >
+                                    Receipt
+                                  </button>
+                                )}
+                                {((!isCancelled && !isCompleted && !isCurrentlyAdmitted) || (appt.recommendAdmission && !isCurrentlyAdmitted)) && (
+                                  <button 
+                                    onClick={() => openHospitalizeModal(appt)}
+                                    style={{ padding: '6px 10px', fontSize: '0.75rem', fontWeight: 600, background: '#E0F2FE', color: '#0369A1', border: '1px solid #BAE6FD', borderRadius: '6px', cursor: 'pointer' }}
+                                  >
+                                    Admit
+                                  </button>
+                                )}
+                                {!isCancelled && !isCompleted && (
+                                  <button 
+                                    onClick={() => handleCancelAppt(appt._id)}
+                                    style={{ padding: '6px 10px', fontSize: '0.75rem', fontWeight: 600, background: '#FEF2F2', color: '#DC2626', border: '1px solid #FECACA', borderRadius: '6px', cursor: 'pointer' }}
+                                  >
+                                    Cancel
+                                  </button>
+                                )}
+                                {(isCancelled || isCompleted) && !isPaid && (
+                                  <span style={{ fontSize: '0.8rem', color: '#94A3B8', fontStyle: 'italic' }}>No actions</span>
+                                )}
+                              </>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+      {/* ==========================================
+          RESCHEDULE MODAL
+          ========================================== */}
+      {rescheduleModal.open && rescheduleModal.appointment && (
+        <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(10, 38, 71, 0.45)', backdropFilter: 'blur(4px)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 2000 }}>
+          <div style={{ background: '#fff', width: '100%', maxWidth: '480px', borderRadius: '16px', padding: '24px', boxShadow: '0 10px 25px rgba(0,0,0,0.15)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid #F1F5F9', paddingBottom: '12px', marginBottom: '16px' }}>
+              <h3 style={{ margin: 0, fontSize: '1.2rem', color: '#0A2647', fontWeight: 700 }}>Reschedule Appointment</h3>
+              <button 
+                onClick={() => setRescheduleModal({ open: false, appointment: null })}
+                style={{ background: 'none', border: 'none', fontSize: '1.3rem', cursor: 'pointer', color: '#94A3B8' }}
+              >
+                ✕
+              </button>
+            </div>
+
+            <form onSubmit={submitReschedule}>
+              <div style={{ background: '#F8FAFC', padding: '12px', borderRadius: '8px', marginBottom: '16px', fontSize: '0.9rem', color: '#334155' }}>
+                <strong>Patient:</strong> {rescheduleModal.appointment.userId?.name} <br />
+                <strong>Doctor:</strong> {rescheduleModal.appointment.doctorName}
+              </div>
+
+              <div style={{ marginBottom: '16px' }}>
+                <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, color: '#334155', marginBottom: '6px' }}>New Appointment Date</label>
+                <input 
+                  type="date"
+                  required
+                  value={rescheduleForm.date}
+                  onChange={e => setRescheduleForm({ ...rescheduleForm, date: e.target.value, time: '' })}
+                  min={new Date().toISOString().split('T')[0]}
+                  style={{ width: '100%', padding: '12px', border: '1.5px solid #CBD5E1', borderRadius: '8px', fontSize: '0.95rem' }}
+                />
+              </div>
+
+              <div style={{ marginBottom: '20px' }}>
+                <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, color: '#334155', marginBottom: '8px' }}>Select Available Slot</label>
+                {rescheduleForm.date ? (
+                  rescheduleAvailableTimes.length > 0 ? (
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(75px, 1fr))', gap: '8px' }}>
+                      {rescheduleAvailableTimes.map(slot => {
+                        const isSelected = rescheduleForm.time === slot;
+                        return (
+                          <button
+                            key={slot}
+                            type="button"
+                            onClick={() => setRescheduleForm({ ...rescheduleForm, time: slot })}
+                            style={{
+                              padding: '10px 4px',
+                              fontSize: '0.85rem',
+                              fontWeight: 700,
+                              border: isSelected ? 'none' : '1px solid #CBD5E1',
+                              borderRadius: '6px',
+                              cursor: 'pointer',
+                              background: isSelected ? '#D97706' : '#fff',
+                              color: isSelected ? '#fff' : '#1E293B',
+                              transition: 'all 0.2s'
+                            }}
+                          >
+                            {slot}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <p style={{ color: '#EF4444', fontSize: '0.9rem', margin: 0 }}>No slots available on this date.</p>
+                  )
+                ) : (
+                  <p style={{ color: '#64748B', fontSize: '0.9rem', margin: 0, fontStyle: 'italic' }}>Please select a date first.</p>
+                )}
+              </div>
+
+              <div style={{ display: 'flex', gap: '12px', marginTop: '24px' }}>
+                <button 
+                  type="submit"
+                  disabled={!rescheduleForm.date || !rescheduleForm.time}
+                  style={{ flex: 1, padding: '12px', background: '#D97706', color: '#fff', border: 'none', borderRadius: '8px', fontWeight: 700, cursor: 'pointer' }}
+                >
+                  Confirm Reschedule
+                </button>
+                <button 
+                  type="button" 
+                  onClick={() => setRescheduleModal({ open: false, appointment: null })}
+                  style={{ padding: '12px 20px', background: '#F1F5F9', border: '1px solid #CBD5E1', borderRadius: '8px', fontWeight: 600, cursor: 'pointer' }}
+                >
+                  Cancel
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ==========================================
+          COLLECT PAYMENT MODAL
+          ========================================== */}
+      {collectPaymentModal.open && collectPaymentModal.appointment && (
+        <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(10, 38, 71, 0.45)', backdropFilter: 'blur(4px)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 2000 }}>
+          <div style={{ background: '#fff', width: '100%', maxWidth: '420px', borderRadius: '16px', padding: '24px', boxShadow: '0 10px 25px rgba(0,0,0,0.15)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid #F1F5F9', paddingBottom: '12px', marginBottom: '16px' }}>
+              <h3 style={{ margin: 0, fontSize: '1.2rem', color: '#0A2647', fontWeight: 700 }}>Record Fee Payment</h3>
+              <button 
+                onClick={() => setCollectPaymentModal({ open: false, appointment: null })}
+                style={{ background: 'none', border: 'none', fontSize: '1.3rem', cursor: 'pointer', color: '#94A3B8' }}
+              >
+                ✕
+              </button>
+            </div>
+
+            <form onSubmit={submitCollectPayment}>
+              <div style={{ background: '#F8FAFC', padding: '12px', borderRadius: '8px', marginBottom: '16px', fontSize: '0.9rem', color: '#334155' }}>
+                <strong>Patient:</strong> {collectPaymentModal.appointment.userId?.name} <br />
+                <strong>Service Charge:</strong> ₹{collectPaymentModal.appointment.amount || 0}
+              </div>
+
+              <div style={{ marginBottom: '16px' }}>
+                <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, color: '#334155', marginBottom: '6px' }}>Amount to Pay (₹)</label>
+                <input 
+                  type="number"
+                  required
+                  value={collectPaymentForm.amount}
+                  onChange={e => setCollectPaymentForm({ ...collectPaymentForm, amount: e.target.value })}
+                  style={{ width: '100%', padding: '12px', border: '1.5px solid #CBD5E1', borderRadius: '8px', fontSize: '0.95rem' }}
+                />
+              </div>
+
+              <div style={{ marginBottom: '20px' }}>
+                <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, color: '#334155', marginBottom: '6px' }}>Payment Method</label>
+                <select 
+                  value={collectPaymentForm.method}
+                  onChange={e => setCollectPaymentForm({ ...collectPaymentForm, method: e.target.value })}
+                  style={{ width: '100%', padding: '12px', border: '1.5px solid #CBD5E1', borderRadius: '8px', fontSize: '0.95rem', background: '#fff' }}
+                >
+                  <option value="Cash">Cash</option>
+                  <option value="UPI">UPI / QR Code</option>
+                  <option value="Card">Card</option>
+                </select>
+              </div>
+
+              <div style={{ display: 'flex', gap: '12px', marginTop: '24px' }}>
+                <button 
+                  type="submit"
+                  style={{ flex: 1, padding: '12px', background: '#059669', color: '#fff', border: 'none', borderRadius: '8px', fontWeight: 700, cursor: 'pointer' }}
+                >
+                  Collect Payment
+                </button>
+                <button 
+                  type="button" 
+                  onClick={() => setCollectPaymentModal({ open: false, appointment: null })}
+                  style={{ padding: '12px 20px', background: '#F1F5F9', border: '1px solid #CBD5E1', borderRadius: '8px', fontWeight: 600, cursor: 'pointer' }}
+                >
+                  Cancel
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Hospitalize Modal */}
+      {hospitalizeModal.open && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '16px' }}>
+          <div style={{ background: '#fff', borderRadius: '14px', padding: '28px', width: '100%', maxWidth: '580px', maxHeight: '90vh', overflowY: 'auto', boxShadow: '0 20px 60px rgba(0,0,0,0.2)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
+              <div>
+                <h2 style={{ margin: 0, fontSize: '1.3rem', fontWeight: 700 }}>Hospitalize Patient</h2>
+                <p style={{ margin: '4px 0 0', color: '#64748b', fontSize: '0.9rem' }}>
+                  {hospitalizeModal.appointment?.userId?.name} — {hospitalizeModal.appointment?.doctorName}
+                </p>
+              </div>
+              <button onClick={() => setHospitalizeModal({ open: false, appointment: null })} style={{ background: 'none', border: 'none', fontSize: '1.4rem', cursor: 'pointer', color: '#94a3b8' }}>✕</button>
+            </div>
+
+            {/* Bed & Ward */}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px', marginBottom: '16px' }}>
+              <div>
+                <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, color: '#374151', marginBottom: '5px' }}>Ward / Room</label>
+                <input
+                  type="text"
+                  placeholder="e.g. General Ward, ICU"
+                  value={hospitalizeForm.ward}
+                  onChange={e => setHospitalizeForm(p => ({ ...p, ward: e.target.value }))}
+                  style={{ width: '100%', padding: '9px 12px', border: '1.5px solid #e2e8f0', borderRadius: '8px', fontSize: '0.95rem', boxSizing: 'border-box' }}
+                />
+              </div>
+              <div>
+                <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, color: '#374151', marginBottom: '5px' }}>Bed Number</label>
+                <input
+                  type="text"
+                  placeholder="e.g. B-12"
+                  value={hospitalizeForm.bedNumber}
+                  onChange={e => setHospitalizeForm(p => ({ ...p, bedNumber: e.target.value }))}
+                  style={{ width: '100%', padding: '9px 12px', border: '1.5px solid #e2e8f0', borderRadius: '8px', fontSize: '0.95rem', boxSizing: 'border-box' }}
+                />
+              </div>
+            </div>
+
+            <div style={{ marginBottom: '16px' }}>
+              <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, color: '#374151', marginBottom: '5px' }}>Admission Date</label>
+              <input
+                type="date"
+                value={hospitalizeForm.admissionDate}
+                onChange={e => setHospitalizeForm(p => ({ ...p, admissionDate: e.target.value }))}
+                style={{ padding: '9px 12px', border: '1.5px solid #e2e8f0', borderRadius: '8px', fontSize: '0.95rem' }}
+              />
+            </div>
+
+            {/* Facilities */}
+            {(hospitalContext?.facilities?.length > 0) ? (
+              <div style={{ marginBottom: '16px' }}>
+                <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, color: '#374151', marginBottom: '10px' }}>
+                  Select Facilities &amp; Days
+                </label>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                  {hospitalContext.facilities.map(f => (
+                    <div key={f.name} style={{ display: 'flex', alignItems: 'center', gap: '12px', padding: '10px 14px', background: '#f8fafc', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontWeight: 600, fontSize: '0.9rem' }}>{f.name}</div>
+                        <div style={{ fontSize: '0.8rem', color: '#64748b' }}>₹{f.pricePerDay}/day</div>
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <label style={{ fontSize: '0.82rem', color: '#475569' }}>Days:</label>
+                        <input
+                          type="number"
+                          min="0"
+                          placeholder="0"
+                          value={hospitalizeForm.facilityDays[f.name] || ''}
+                          onChange={e => setHospitalizeForm(p => ({ ...p, facilityDays: { ...p.facilityDays, [f.name]: e.target.value } }))}
+                          style={{ width: '70px', padding: '6px 10px', border: '1.5px solid #e2e8f0', borderRadius: '7px', fontSize: '0.9rem', textAlign: 'center' }}
+                        />
+                      </div>
+                      {hospitalizeForm.facilityDays[f.name] > 0 && (
+                        <div style={{ fontWeight: 700, color: '#1d4ed8', fontSize: '0.9rem', minWidth: '70px', textAlign: 'right' }}>
+                          ₹{(f.pricePerDay * Number(hospitalizeForm.facilityDays[f.name])).toLocaleString('en-IN')}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+                {/* Total */}
+                {Object.values(hospitalizeForm.facilityDays).some(d => d > 0) && (
+                  <div style={{ marginTop: '12px', padding: '10px 14px', background: '#eff6ff', borderRadius: '8px', display: 'flex', justifyContent: 'space-between', fontWeight: 700 }}>
+                    <span>Total Facility Cost:</span>
+                    <span style={{ color: '#1d4ed8' }}>
+                      ₹{(hospitalContext.facilities.reduce((sum, f) => sum + (f.pricePerDay * (Number(hospitalizeForm.facilityDays[f.name]) || 0)), 0)).toLocaleString('en-IN')}
+                    </span>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div style={{ padding: '12px 14px', background: '#fef9c3', borderRadius: '8px', fontSize: '0.88rem', color: '#92400e', marginBottom: '16px' }}>
+                No facilities configured. Hospital admin can add facilities from the Hospital Admin Dashboard.
+              </div>
+            )}
+
+            <div style={{ marginBottom: '20px' }}>
+              <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, color: '#374151', marginBottom: '5px' }}>Notes (optional)</label>
+              <textarea
+                placeholder="Any notes for admission..."
+                value={hospitalizeForm.notes}
+                onChange={e => setHospitalizeForm(p => ({ ...p, notes: e.target.value }))}
+                rows={2}
+                style={{ width: '100%', padding: '9px 12px', border: '1.5px solid #e2e8f0', borderRadius: '8px', fontSize: '0.9rem', resize: 'vertical', boxSizing: 'border-box' }}
+              />
+            </div>
+
+            <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
+              <button onClick={() => setHospitalizeModal({ open: false, appointment: null })} style={{ padding: '10px 20px', background: '#f1f5f9', border: '1px solid #cbd5e1', borderRadius: '8px', cursor: 'pointer', fontWeight: 600, color: '#475569' }}>
+                Cancel
+              </button>
+              <button
+                onClick={handleHospitalize}
+                disabled={hospitalizingSaving}
+                style={{ padding: '10px 24px', background: '#1d4ed8', color: '#fff', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: 700, fontSize: '0.95rem', opacity: hospitalizingSaving ? 0.6 : 1 }}
+              >
+                {hospitalizingSaving ? 'Admitting...' : 'Admit Patient'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 };

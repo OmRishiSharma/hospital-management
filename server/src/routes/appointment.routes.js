@@ -106,6 +106,29 @@ router.patch('/reception/reschedule/:id', verifyToken, resolveTenant, async (req
         if (appointment.status === 'cancelled') appointment.status = 'confirmed';
         await appointment.save();
 
+        const io = req.app.get('io');
+        if (io) {
+            const hId = appointment.hospitalId || req.user.hospitalId;
+            const docIdStr = appointment.doctorId ? appointment.doctorId.toString() : '';
+            const docUserIdStr = appointment.doctorUserId ? appointment.doctorUserId.toString() : '';
+
+            // Emit to global role rooms
+            io.to('receptionist').to('reception').to('receptiondeskmanager').emit('appointment_updated', appointment);
+            if (docIdStr) io.to(docIdStr).emit('appointment_updated', appointment);
+            if (docUserIdStr) io.to(docUserIdStr).emit('appointment_updated', appointment);
+            io.to('doctor').emit('appointment_updated', appointment);
+
+            // Emit to hospital-scoped rooms
+            if (hId) {
+                const hospRoom = `hospital_${hId}`;
+                io.to(hospRoom).emit('appointment_updated', appointment);
+                io.to(`${hospRoom}_receptionist`).to(`${hospRoom}_reception`).to(`${hospRoom}_receptiondeskmanager`).emit('appointment_updated', appointment);
+                if (docIdStr) io.to(`${hospRoom}_${docIdStr}`).emit('appointment_updated', appointment);
+                if (docUserIdStr) io.to(`${hospRoom}_${docUserIdStr}`).emit('appointment_updated', appointment);
+                io.to(`${hospRoom}_doctor`).emit('appointment_updated', appointment);
+            }
+        }
+
         res.json({ success: true, message: 'Appointment rescheduled successfully', appointment });
     } catch (error) {
         res.status(500).json({ success: false, message: 'Error rescheduling appointment' });
@@ -123,6 +146,30 @@ router.patch('/reception/cancel/:id', verifyToken, resolveTenant, async (req, re
             req.params.id, { status: 'cancelled' }, { new: true }
         );
         if (!appointment) return res.status(404).json({ success: false, message: 'Appointment not found' });
+
+        const io = req.app.get('io');
+        if (io) {
+            const hId = appointment.hospitalId || req.user.hospitalId;
+            const docIdStr = appointment.doctorId ? appointment.doctorId.toString() : '';
+            const docUserIdStr = appointment.doctorUserId ? appointment.doctorUserId.toString() : '';
+
+            // Emit to global role rooms
+            io.to('receptionist').to('reception').to('receptiondeskmanager').emit('appointment_updated', appointment);
+            if (docIdStr) io.to(docIdStr).emit('appointment_updated', appointment);
+            if (docUserIdStr) io.to(docUserIdStr).emit('appointment_updated', appointment);
+            io.to('doctor').emit('appointment_updated', appointment);
+
+            // Emit to hospital-scoped rooms
+            if (hId) {
+                const hospRoom = `hospital_${hId}`;
+                io.to(hospRoom).emit('appointment_updated', appointment);
+                io.to(`${hospRoom}_receptionist`).to(`${hospRoom}_reception`).to(`${hospRoom}_receptiondeskmanager`).emit('appointment_updated', appointment);
+                if (docIdStr) io.to(`${hospRoom}_${docIdStr}`).emit('appointment_updated', appointment);
+                if (docUserIdStr) io.to(`${hospRoom}_${docUserIdStr}`).emit('appointment_updated', appointment);
+                io.to(`${hospRoom}_doctor`).emit('appointment_updated', appointment);
+            }
+        }
+
         res.json({ success: true, message: 'Appointment cancelled', appointment });
     } catch (error) {
         res.status(500).json({ success: false, message: 'Error cancelling appointment' });
@@ -231,6 +278,30 @@ router.post('/create', verifyToken, resolveTenant, async (req, res) => {
         });
 
         const savedAppointment = await appointment.save();
+
+        const io = req.app.get('io');
+        if (io) {
+            const hId = hospitalId || req.user.hospitalId || savedAppointment.hospitalId;
+            const docIdStr = doctorDoc._id.toString();
+            const docUserIdStr = doctorDoc.userId ? doctorDoc.userId.toString() : '';
+
+            // Emit to global role rooms
+            io.to('receptionist').to('reception').to('receptiondeskmanager').emit('appointment_created', savedAppointment);
+            if (docIdStr) io.to(docIdStr).emit('appointment_created', savedAppointment);
+            if (docUserIdStr) io.to(docUserIdStr).emit('appointment_created', savedAppointment);
+            io.to('doctor').emit('appointment_created', savedAppointment);
+
+            // Emit to hospital-scoped rooms
+            if (hId) {
+                const hospRoom = `hospital_${hId}`;
+                io.to(hospRoom).emit('appointment_created', savedAppointment);
+                io.to(`${hospRoom}_receptionist`).to(`${hospRoom}_reception`).to(`${hospRoom}_receptiondeskmanager`).emit('appointment_created', savedAppointment);
+                if (docIdStr) io.to(`${hospRoom}_${docIdStr}`).emit('appointment_created', savedAppointment);
+                if (docUserIdStr) io.to(`${hospRoom}_${docUserIdStr}`).emit('appointment_created', savedAppointment);
+                io.to(`${hospRoom}_doctor`).emit('appointment_created', savedAppointment);
+            }
+        }
+
         res.status(201).json({ success: true, message: 'Appointment booked successfully', appointment: savedAppointment });
 
     } catch (error) {

@@ -19,6 +19,7 @@ const Patient = () => {
         chiefComplaint: '', notes: ''
     });
     const [saving, setSaving] = useState(false);
+    const [hoveredCard, setHoveredCard] = useState(null);
 
     useEffect(() => {
         fetchAllAppointments();
@@ -185,9 +186,21 @@ const Patient = () => {
     const todayAppts = filtered.filter(a =>
         new Date(a.appointmentDate).toDateString() === todayStr
     );
+    const upcomingAppts = filtered.filter(a => {
+        const d = new Date(a.appointmentDate);
+        const today = new Date();
+        today.setHours(0,0,0,0);
+        return d >= today && (a.status === 'pending' || a.status === 'confirmed');
+    });
+    const completedTodayAppts = filtered.filter(a =>
+        a.status === 'completed' && new Date(a.appointmentDate).toDateString() === todayStr
+    );
     const allAppts = filtered;
 
-    const displayList = activeTab === 'today' ? todayAppts : allAppts;
+    let displayList = allAppts;
+    if (activeTab === 'today') displayList = todayAppts;
+    else if (activeTab === 'upcoming') displayList = upcomingAppts;
+    else if (activeTab === 'completed_today') displayList = completedTodayAppts;
 
     // Stat counts
     const todayTotal = appointments.filter(a => new Date(a.appointmentDate).toDateString() === todayStr).length;
@@ -270,11 +283,23 @@ const Patient = () => {
             {/* ─── STATS ─── */}
             <div style={{ ...S.statsRow, padding: '0 0 20px' }}>
                 {[
-                    { label: "Total Patients (Unique)", value: totalPatientsUnique, icon: '👥', g: 'linear-gradient(135deg, #06b6d4, #0d9488)' },
-                    { label: 'Upcoming Appointments', value: upcomingAppointments, icon: '📅', g: 'linear-gradient(135deg, #f59e0b, #ef4444)' },
-                    { label: 'Completed Today', value: completedToday, icon: '✅', g: 'linear-gradient(135deg, #10b981, #059669)' },
+                    { label: "Total Patients (Unique)", value: totalPatientsUnique, icon: '👥', g: 'linear-gradient(135deg, #06b6d4, #0d9488)', onClick: () => setActiveTab('all') },
+                    { label: 'Upcoming Appointments', value: upcomingAppointments, icon: '📅', g: 'linear-gradient(135deg, #f59e0b, #ef4444)', onClick: () => setActiveTab('upcoming') },
+                    { label: 'Completed Today', value: completedToday, icon: '✅', g: 'linear-gradient(135deg, #10b981, #059669)', onClick: () => setActiveTab('completed_today') },
                 ].map((s, i) => (
-                    <div key={i} style={S.statCard(s.g)}>
+                    <div key={i} 
+                        style={{ 
+                            ...S.statCard(s.g), 
+                            transform: hoveredCard === i ? 'translateY(-3px)' : 'none', 
+                            border: hoveredCard === i ? '1px solid rgba(255,255,255,0.18)' : '1px solid rgba(255,255,255,0.06)', 
+                            boxShadow: hoveredCard === i ? '0 10px 25px rgba(0,0,0,0.35)' : 'none',
+                            background: hoveredCard === i ? 'rgba(255,255,255,0.08)' : 'rgba(255,255,255,0.04)',
+                            cursor: 'pointer'
+                        }}
+                        onMouseEnter={() => setHoveredCard(i)}
+                        onMouseLeave={() => setHoveredCard(null)}
+                        onClick={s.onClick}
+                    >
                         <div style={S.statIcon(s.g)}>{s.icon}</div>
                         <div>
                             <div style={S.statNum}>{s.value}</div>
@@ -303,6 +328,12 @@ const Patient = () => {
                     <button style={S.tab(activeTab === 'today')} onClick={() => setActiveTab('today')}>
                         Today's Queue {todayAppts.length > 0 && <span style={{ marginLeft: '6px', background: 'rgba(255,255,255,0.2)', padding: '2px 8px', borderRadius: '10px', fontSize: '0.72rem' }}>{todayAppts.length}</span>}
                     </button>
+                    <button style={S.tab(activeTab === 'upcoming')} onClick={() => setActiveTab('upcoming')}>
+                        Upcoming {upcomingAppts.length > 0 && <span style={{ marginLeft: '6px', background: 'rgba(255,255,255,0.2)', padding: '2px 8px', borderRadius: '10px', fontSize: '0.72rem' }}>{upcomingAppts.length}</span>}
+                    </button>
+                    <button style={S.tab(activeTab === 'completed_today')} onClick={() => setActiveTab('completed_today')}>
+                        Completed Today {completedTodayAppts.length > 0 && <span style={{ marginLeft: '6px', background: 'rgba(255,255,255,0.2)', padding: '2px 8px', borderRadius: '10px', fontSize: '0.72rem' }}>{completedTodayAppts.length}</span>}
+                    </button>
                     <button style={S.tab(activeTab === 'all')} onClick={() => setActiveTab('all')}>
                         All Appointments
                     </button>
@@ -319,9 +350,17 @@ const Patient = () => {
                     </div>
                 ) : displayList.length === 0 ? (
                     <div style={S.empty}>
-                        <div style={{ fontSize: '3rem', marginBottom: '10px' }}>{activeTab === 'today' ? '📭' : '📋'}</div>
+                        <div style={{ fontSize: '3rem', marginBottom: '10px' }}>
+                            {activeTab === 'today' && '📭'}
+                            {activeTab === 'upcoming' && '📅'}
+                            {activeTab === 'completed_today' && '✅'}
+                            {activeTab === 'all' && '📋'}
+                        </div>
                         <h4 style={{ color: '#e2e8f0', margin: '0 0 6px', fontWeight: '700' }}>
-                            {activeTab === 'today' ? 'No Patients in Today\'s Queue' : 'No Active Appointments'}
+                            {activeTab === 'today' && "No Patients in Today's Queue"}
+                            {activeTab === 'upcoming' && "No Upcoming Appointments"}
+                            {activeTab === 'completed_today' && "No Completed Appointments Today"}
+                            {activeTab === 'all' && "No Active Appointments"}
                         </h4>
                         <p style={{ color: '#64748b', margin: 0, fontSize: '0.88rem' }}>
                             {searchQuery ? 'No results match your search. Try a different term.' : 'Patients will appear here when appointments are booked.'}
@@ -331,7 +370,10 @@ const Patient = () => {
                     <>
                         <div style={S.sectionHeader}>
                             <h3 style={S.sectionTitle}>
-                                {activeTab === 'today' ? '🏥 Today\'s Patient Queue' : '📁 All Appointments'}
+                                {activeTab === 'today' && "🏥 Today's Patient Queue"}
+                                {activeTab === 'upcoming' && "📅 Upcoming Appointments"}
+                                {activeTab === 'completed_today' && "✅ Completed Today's Appointments"}
+                                {activeTab === 'all' && "📁 All Appointments"}
                             </h3>
                             <span style={S.sectionCount}>{displayList.length} patients</span>
                         </div>

@@ -79,15 +79,19 @@ exports.verifyToken = async (req, res, next) => {
         req.user = user;
         req.user._roleData = roleData;
 
-        // Merge per-user customPermissions into the effective permission set.
-        // This enables a single account to hold role permissions PLUS extra custom grants.
+        // Merge per-user customPermissions and subtract deniedPermissions from the effective permission set.
+        // This enables a single account to hold role permissions PLUS extra custom grants, minus denied ones.
         // SuperAdmin wildcard '*' always wins — no merging needed there.
-        if (roleData && user.customPermissions && user.customPermissions.length > 0) {
+        if (roleData) {
             const existingPerms = roleData.permissions || [];
             if (!existingPerms.includes('*')) {
-                // Create a merged, de-duplicated permissions array on _roleData
-                const merged = Array.from(new Set([...existingPerms, ...user.customPermissions]));
-                req.user._roleData = { ...roleData.toObject ? roleData.toObject() : roleData, permissions: merged };
+                const customPerms = user.customPermissions || [];
+                const deniedPerms = user.deniedPermissions || [];
+                if (customPerms.length > 0 || deniedPerms.length > 0) {
+                    // Create a merged, de-duplicated permissions array on _roleData and filter out denied ones
+                    const merged = Array.from(new Set([...existingPerms, ...customPerms].filter(p => !deniedPerms.includes(p))));
+                    req.user._roleData = { ...roleData.toObject ? roleData.toObject() : roleData, permissions: merged };
+                }
             }
         }
 

@@ -13,6 +13,8 @@ const AdminRoles = () => {
     const [editingRoleId, setEditingRoleId] = useState(null);
     const [loading, setLoading] = useState(false);
     const [message, setMessage] = useState({ type: '', text: '' });
+    const [showSaveSuccess, setShowSaveSuccess] = useState(false);
+    const [successPopupMsg, setSuccessPopupMsg] = useState('');
 
     // Organized Permissions List
     const PERMISSIONS = [
@@ -37,6 +39,7 @@ const AdminRoles = () => {
                 { key: 'appointment_view_all', label: 'View All Appointments' },
                 { key: 'lab_view', label: 'View Lab Tests' },
                 { key: 'lab_manage', label: 'Manage Lab Tests' },
+                { key: 'lab_reports_view', label: 'View Lab Reports' },
                 { key: 'pharmacy_view', label: 'View Pharmacy' },
                 { key: 'pharmacy_manage', label: 'Pharmacy & Inventory' }
             ]
@@ -74,6 +77,7 @@ const AdminRoles = () => {
         appointment_view_all: { label: 'All Appointments', path: '/reception/dashboard' },
         lab_view: { label: 'Lab Dashboard', path: '/lab/dashboard' },
         lab_manage: { label: 'Lab Tests', path: '/lab/tests' },
+        lab_reports_view: { label: 'Lab Reports', path: '/lab/completed' },
         pharmacy_view: { label: 'Pharmacy', path: '/pharmacy/inventory' },
         pharmacy_manage: { label: 'Pharmacy Orders', path: '/pharmacy/orders' },
         // Admin
@@ -188,9 +192,13 @@ const AdminRoles = () => {
             if (editingRoleId) {
                 await adminAPI.updateRole(editingRoleId, cleanedData);
                 setMessage({ type: 'success', text: 'Role updated successfully!' });
+                setSuccessPopupMsg('Role has been updated successfully.');
+                setShowSaveSuccess(true);
             } else {
                 await adminAPI.createRole(cleanedData);
                 setMessage({ type: 'success', text: 'Role created successfully!' });
+                setSuccessPopupMsg('Role has been created successfully.');
+                setShowSaveSuccess(true);
             }
             resetForm();
             fetchRoles();
@@ -215,12 +223,59 @@ const AdminRoles = () => {
     return (
         <div className="roles-page-container">
             <header className="roles-header">
-                <button
-                    onClick={() => navigate('/admin')}
-                    style={{ background: 'none', border: 'none', color: '#64748b', cursor: 'pointer', fontSize: '14px', padding: '0 0 8px', display: 'flex', alignItems: 'center', gap: '4px' }}
-                >
-                    ← Back to Dashboard
-                </button>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', marginBottom: '8px' }}>
+                    <button
+                        onClick={() => {
+                            const user = JSON.parse(localStorage.getItem('user') || '{}');
+                            const role = (user.role || '').toLowerCase();
+                            if (role === 'superadmin' || role === 'centraladmin') {
+                                navigate('/supremeadmin');
+                            } else {
+                                navigate('/admin');
+                            }
+                        }}
+                        style={{ background: 'none', border: 'none', color: '#64748b', cursor: 'pointer', fontSize: '14px', display: 'flex', alignItems: 'center', gap: '4px' }}
+                    >
+                        ← Back to Dashboard
+                    </button>
+                    {(() => {
+                        const user = JSON.parse(localStorage.getItem('user') || '{}');
+                        const role = (user.role || '').toLowerCase();
+                        if (role === 'superadmin' || role === 'centraladmin') {
+                            return (
+                                <button
+                                    onClick={() => navigate('/supremeadmin', { state: { openTab: 'permissions' } })}
+                                    style={{
+                                        background: 'linear-gradient(135deg, #6366f1 0%, #4f46e5 100%)',
+                                        color: 'white',
+                                        border: 'none',
+                                        borderRadius: '10px',
+                                        padding: '8px 16px',
+                                        fontSize: '13px',
+                                        fontWeight: 700,
+                                        cursor: 'pointer',
+                                        boxShadow: '0 4px 10px rgba(99, 102, 241, 0.2)',
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        gap: '6px',
+                                        transition: 'all 0.2s'
+                                    }}
+                                    onMouseEnter={(e) => {
+                                        e.currentTarget.style.opacity = '0.9';
+                                        e.currentTarget.style.transform = 'translateY(-1px)';
+                                    }}
+                                    onMouseLeave={(e) => {
+                                        e.currentTarget.style.opacity = '1';
+                                        e.currentTarget.style.transform = 'none';
+                                    }}
+                                >
+                                    🔐 Go to Dynamic Permissions
+                                </button>
+                            );
+                        }
+                        return null;
+                    })()}
+                </div>
                 <h1>Role & Permission Manager</h1>
                 <p>Define custom access levels for your hospital staff.</p>
             </header>
@@ -390,6 +445,110 @@ const AdminRoles = () => {
                     </div>
                 </div>
             </div>
+
+            {/* Save Success Popup Modal */}
+            {showSaveSuccess && (
+                <div style={{
+                    position: 'fixed',
+                    inset: 0,
+                    backgroundColor: 'rgba(15, 23, 42, 0.65)',
+                    backdropFilter: 'blur(8px)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    zIndex: 9999,
+                    animation: 'fadeIn 0.25s ease-out'
+                }}>
+                    <style>{`
+                        @keyframes fadeIn {
+                            from { opacity: 0; }
+                            to { opacity: 1; }
+                        }
+                        @keyframes scaleUp {
+                            from { transform: scale(0.92); opacity: 0; }
+                            to { transform: scale(1); opacity: 1; }
+                        }
+                        @keyframes pulseSuccess {
+                            0% { transform: scale(1); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.4); }
+                            70% { transform: scale(1.04); box-shadow: 0 0 0 10px rgba(16, 185, 129, 0); }
+                            100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
+                        }
+                    `}</style>
+                    <div style={{
+                        background: 'white',
+                        borderRadius: '24px',
+                        padding: '36px 32px',
+                        width: '90%',
+                        maxWidth: '400px',
+                        textAlign: 'center',
+                        boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.25)',
+                        border: '1px solid rgba(226, 232, 240, 0.8)',
+                        animation: 'scaleUp 0.3s cubic-bezier(0.34, 1.56, 0.64, 1)'
+                    }}>
+                        <div style={{
+                            width: '72px',
+                            height: '72px',
+                            borderRadius: '50%',
+                            background: '#dcfce7',
+                            color: '#15803d',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            fontSize: '36px',
+                            margin: '0 auto 20px',
+                            boxShadow: '0 0 0 8px #f0fdf4',
+                            animation: 'pulseSuccess 2s infinite'
+                        }}>
+                            ✓
+                        </div>
+                        
+                        <h3 style={{
+                            margin: '0 0 8px',
+                            fontSize: '20px',
+                            fontWeight: 850,
+                            color: '#1e293b'
+                        }}>
+                            Changes Saved!
+                        </h3>
+                        
+                        <p style={{
+                            margin: '0 0 24px',
+                            fontSize: '14px',
+                            color: '#64748b',
+                            lineHeight: 1.5
+                        }}>
+                            {successPopupMsg}
+                        </p>
+                        
+                        <button 
+                            onClick={() => setShowSaveSuccess(false)}
+                            style={{
+                                width: '100%',
+                                padding: '12px 24px',
+                                borderRadius: '12px',
+                                border: 'none',
+                                background: 'linear-gradient(135deg, #10b981, #059669)',
+                                color: 'white',
+                                fontWeight: 700,
+                                fontSize: '14px',
+                                cursor: 'pointer',
+                                boxShadow: '0 4px 12px rgba(16, 185, 129, 0.3)',
+                                transition: 'all 0.2s'
+                            }}
+                            onMouseEnter={(e) => {
+                                e.currentTarget.style.opacity = '0.9';
+                                e.currentTarget.style.transform = 'translateY(-1px)';
+                            }}
+                            onMouseLeave={(e) => {
+                                e.currentTarget.style.opacity = '1';
+                                e.currentTarget.style.transform = 'none';
+                            }}
+                        >
+                            OK
+                        </button>
+                    </div>
+                </div>
+            )}
         </div>
     );
 };

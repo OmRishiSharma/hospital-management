@@ -46,9 +46,17 @@ const userSchema = new mongoose.Schema({
     // Scoped to this user's hospital (same hospital as hospitalId field above)
     // Format: array of permission strings, e.g. ['billing_manage', 'lab_view']
     customPermissions: [{ type: String, trim: true }],
+    deniedPermissions: [{ type: String, trim: true }],
 
     // Profile Image
     avatar: { type: String, default: null },
+
+    pastReports: [{
+        name: { type: String, required: true },
+        filename: { type: String, required: true },
+        mimetype: { type: String, required: true },
+        uploadedAt: { type: Date, default: Date.now }
+    }],
 
     // MFA (TOTP-based, optional per staff account)
     mfaEnabled: { type: Boolean, default: false },

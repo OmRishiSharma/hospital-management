@@ -322,7 +322,15 @@ const AdminQuestionLibrary = () => {
             <div style={{ padding: '10px 16px', background: 'white', borderBottom: '1px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <div>
                     <button
-                        onClick={() => navigate('/admin')}
+                        onClick={() => {
+                            const user = JSON.parse(localStorage.getItem('user') || '{}');
+                            const role = (user.role || '').toLowerCase();
+                            if (role === 'superadmin' || role === 'centraladmin') {
+                                navigate('/supremeadmin');
+                            } else {
+                                navigate('/admin');
+                            }
+                        }}
                         style={{ background: 'none', border: 'none', color: '#64748b', cursor: 'pointer', fontSize: '12px', padding: '0 0 4px', display: 'flex', alignItems: 'center', gap: '4px' }}
                     >
                         ← Back to Dashboard

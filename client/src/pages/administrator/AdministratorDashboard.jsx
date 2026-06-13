@@ -588,6 +588,10 @@ const AdministratorDashboard = ({ tab = 'dashboard' }) => {
 
     // Load active tab data
     useEffect(() => {
+        if (userRole === 'accountant' && (tab === 'beds' || tab === 'operations')) {
+            navigate('/administrator/dashboard', { replace: true });
+            return;
+        }
         fetchTabData();
     }, [tab]);
 
@@ -1335,6 +1339,7 @@ const AdministratorDashboard = ({ tab = 'dashboard' }) => {
                                 <div className="bed-stat-mini available"><span>Available</span><strong>{bedsStats.available}</strong></div>
                                 <div className="bed-stat-mini occupied"><span>Occupied</span><strong>{bedsStats.occupied}</strong></div>
                                 <div className="bed-stat-mini icu"><span>ICU Occupancy</span><strong>{bedsStats.icuOccupied} / 10</strong></div>
+                                <div className="bed-stat-mini" style={{ borderLeft: '3px solid #8b5cf6', background: '#f5f3ff' }}><span style={{ color: '#7c3aed' }}>Private Rooms</span><strong style={{ color: '#7c3aed' }}>{beds.filter(b => b.ward === 'Private Room').length}</strong></div>
                             </div>
 
                             <div className="beds-grid-row">
@@ -1346,6 +1351,7 @@ const AdministratorDashboard = ({ tab = 'dashboard' }) => {
                                                 <option value="All">All Wards</option>
                                                 <option value="General Ward">General Ward</option>
                                                 <option value="ICU">ICU Ward</option>
+                                                <option value="Private Room">Private Room</option>
                                             </select>
                                         </div>
                                     </div>
@@ -1356,11 +1362,13 @@ const AdministratorDashboard = ({ tab = 'dashboard' }) => {
                                             .map(b => (
                                                 <div
                                                     key={b.bedNumber}
-                                                    className={`bed-slot ${b.status} ${b.ward === 'ICU' ? 'icu-slot' : ''}`}
+                                                    className={`bed-slot ${b.status} ${b.ward === 'ICU' ? 'icu-slot' : ''} ${b.ward === 'Private Room' ? 'private-slot' : ''}`}
                                                     onClick={() => handleOpenTransfer(b)}
                                                 >
                                                     <span className="bed-num">{b.bedNumber}</span>
-                                                    <span className="bed-ward">{b.ward === 'ICU' ? 'ICU' : 'GW'}</span>
+                                                    <span className="bed-ward">
+                                                        {b.ward === 'ICU' ? 'ICU' : b.ward === 'Private Room' ? 'PR' : 'GW'}
+                                                    </span>
                                                     {b.status === 'Occupied' && (
                                                         <div className="bed-occupant-tooltip">
                                                             <strong>{b.patientName}</strong>
@@ -1406,6 +1414,7 @@ const AdministratorDashboard = ({ tab = 'dashboard' }) => {
                                                 >
                                                     <option value="General Ward">General Ward</option>
                                                     <option value="ICU">ICU Ward</option>
+                                                    <option value="Private Room">Private Room</option>
                                                 </select>
                                             </div>
                                             <div className="form-group" style={{ marginBottom: '20px' }}>

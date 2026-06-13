@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth, useAppDispatch } from '../../store/hooks';
 import { updateUser, logout } from '../../store/slices/authSlice';
+import { authAPI } from '../../utils/api';
 import { FiUser, FiMail, FiPhone, FiLock, FiLogOut, FiSave, FiUploadCloud } from 'react-icons/fi';
 import './AdminProfile.css';
 
@@ -50,17 +51,23 @@ const AdminProfile = () => {
         setSuccessMsg('');
 
         try {
-            // Dispatch update to Redux and sync with localStorage
-            dispatch(updateUser(formData));
-            setSuccessMsg('Profile updated successfully.');
+            // Call the backend to persist the change to the database
+            const res = await authAPI.updateProfile(formData);
+            if (res.success) {
+                // Merge updated fields into Redux store + localStorage so all panels reflect changes
+                dispatch(updateUser(res.user));
+                setSuccessMsg('Profile updated successfully. Changes are now visible across all panels.');
+            } else {
+                setErrorMsg(res.message || 'Failed to update profile.');
+            }
         } catch (err) {
-            setErrorMsg('Failed to update profile details.');
+            setErrorMsg(err.response?.data?.message || 'Failed to update profile. Please try again.');
         } finally {
             setSaving(false);
         }
     };
 
-    const handlePasswordSubmit = (e) => {
+    const handlePasswordSubmit = async (e) => {
         e.preventDefault();
         setErrorMsg('');
         setSuccessMsg('');
@@ -76,11 +83,19 @@ const AdminProfile = () => {
         }
 
         setSaving(true);
-        setTimeout(() => {
-            setSuccessMsg('Password changed successfully.');
-            setPasswordData({ currentPassword: '', newPassword: '', confirmPassword: '' });
+        try {
+            const res = await authAPI.changePassword(passwordData.currentPassword, passwordData.newPassword);
+            if (res.success) {
+                setSuccessMsg('Password changed successfully.');
+                setPasswordData({ currentPassword: '', newPassword: '', confirmPassword: '' });
+            } else {
+                setErrorMsg(res.message || 'Failed to change password.');
+            }
+        } catch (err) {
+            setErrorMsg(err.response?.data?.message || 'Failed to change password. Please check your current password.');
+        } finally {
             setSaving(false);
-        }, 1000);
+        }
     };
 
     const handleLogout = () => {

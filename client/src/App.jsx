@@ -5,11 +5,31 @@ import './App.css'
 import socket from './utils/socket'
 import { useAuth, useAppDispatch } from './store/hooks'
 import { useBranding } from './context/BrandingContext'
+import { updateUser } from './store/slices/authSlice'
+import { authAPI } from './utils/api'
 
 const App = () => {
   const { user, isAuthenticated } = useAuth();
   const dispatch = useAppDispatch();
   const { loadBranding, resetBranding } = useBranding();
+
+  // Refresh user profile/permissions on mount/load if authenticated
+  useEffect(() => {
+    const token = localStorage.getItem('token');
+    if (token) {
+      const fetchProfile = async () => {
+        try {
+          const res = await authAPI.getProfile();
+          if (res.success && res.user) {
+            dispatch(updateUser(res.user));
+          }
+        } catch (err) {
+          console.error('Failed to sync profile permissions on mount:', err);
+        }
+      };
+      fetchProfile();
+    }
+  }, [dispatch]);
 
   // Auto-load hospital branding when user logs in
   useEffect(() => {
@@ -28,24 +48,65 @@ const App = () => {
   // Socket Connection Management
   useEffect(() => {
     if (isAuthenticated && user) {
-      socket.connect();
-      socket.emit('join', user._id || user.id);
-
       const roleStr = typeof user.role === 'string'
         ? user.role.toLowerCase()
         : user._roleData?.name?.toLowerCase();
 
-      if (roleStr) socket.emit('join', roleStr);
+      const joinRooms = () => {
+        const uId = user._id || user.id;
+        if (uId) socket.emit('join', uId);
+
+        const roomsToJoin = [];
+        if (roleStr) {
+          roomsToJoin.push(roleStr);
+
+          // Role aliases mapping
+          if (['reception', 'receptionist', 'receptiondeskmanager'].includes(roleStr)) {
+            roomsToJoin.push('reception', 'receptionist', 'receptiondeskmanager');
+          } else if (['pharmacy', 'pharmacist'].includes(roleStr)) {
+            roomsToJoin.push('pharmacy', 'pharmacist');
+          } else if (['lab', 'laboratory', 'labtechnician'].includes(roleStr)) {
+            roomsToJoin.push('lab', 'laboratory', 'labtechnician');
+          }
+        }
+
+        // Emit joins for global rooms
+        const uniqueRooms = [...new Set(roomsToJoin)];
+        uniqueRooms.forEach(room => socket.emit('join', room));
+
+        // Join hospital-scoped rooms for multi-tenancy isolation
+        if (user.hospitalId) {
+          socket.emit('join', `hospital_${user.hospitalId}`);
+          uniqueRooms.forEach(room => {
+            socket.emit('join', `hospital_${user.hospitalId}_${room}`);
+          });
+        }
+      };
+
+      // Register listener so that we re-join on reconnect
+      socket.on('connect', joinRooms);
+
+      // Connect if disconnected
+      if (!socket.connected) {
+        socket.connect();
+      } else {
+        // Already connected, join immediately
+        joinRooms();
+      }
 
       socket.on('new_notification', (notification) => {
         dispatch({ type: 'notifications/addNotification', payload: notification });
       });
+
+      return () => {
+        socket.off('connect', joinRooms);
+        socket.off('new_notification');
+        socket.disconnect();
+      };
     } else {
       socket.disconnect();
     }
-
-    return () => { socket.disconnect(); };
-  }, [isAuthenticated, user]);
+  }, [isAuthenticated, user, dispatch]);
 
   // Smooth scrolling
   useEffect(() => {

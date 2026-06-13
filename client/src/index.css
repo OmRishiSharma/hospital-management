@@ -385,3 +385,39 @@ a:hover {
   padding: 0 var(--space-6);
   width: 100%;
 }
+
+/* ====== GLOBAL CANCEL BUTTON UI ====== */
+button.btn-cancel, 
+.btn-cancel {
+  background-color: #f1f5f9 !important;
+  color: #475569 !important;
+  border: 1px solid #cbd5e1 !important;
+  padding: 10px 20px !important;
+  border-radius: 8px !important;
+  font-size: 0.9rem !important;
+  font-weight: 600 !important;
+  cursor: pointer !important;
+  transition: all 0.2s ease !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  white-space: nowrap !important;
+  height: auto !important;
+  flex: 0 0 auto !important; /* Prevents flex-grow stretching */
+  align-self: center !important; /* Prevents align-items stretch */
+}
+
+button.btn-cancel:hover,
+.btn-cancel:hover {
+  background-color: #e2e8f0 !important;
+  color: #1e293b !important;
+  border-color: #94a3b8 !important;
+  transform: translateY(-1px) !important;
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03) !important;
+}
+
+button.btn-cancel:active,
+.btn-cancel:active {
+  transform: translateY(0) !important;
+  box-shadow: none !important;
+}

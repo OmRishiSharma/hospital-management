@@ -93,6 +93,185 @@ router.get('/resolve/:slug', async (req, res) => {
     }
 });
 
+const defaultRoles = [
+    {
+        name: 'Admin',
+        description: 'Hospital superadmin with full management access',
+        permissions: [
+            'admin_manage_roles', 'admin_view_stats',
+            'patient_search', 'patient_view', 'patient_edit',
+            'visit_intake', 'clinical_history_view'
+        ],
+        dashboardPath: '/admin',
+        navLinks: [
+            { label: 'Dashboard', path: '/admin' },
+            { label: 'Users', path: '/admin/users' },
+            { label: 'Doctors', path: '/admin/doctors' },
+            { label: 'Labs', path: '/admin/labs' },
+            { label: 'Pharmacy', path: '/admin/pharmacy' },
+            { label: 'Reception', path: '/admin/reception' },
+            { label: 'Services', path: '/admin/services' },
+            { label: 'Roles', path: '/admin/roles' }
+        ],
+        isSystemRole: false
+    },
+    {
+        name: 'Doctor',
+        description: 'Medical doctor with clinical access',
+        permissions: [
+            'visit_diagnose', 'patient_view', 'clinical_history_view'
+        ],
+        dashboardPath: '/doctor/patients',
+        navLinks: [
+            { label: 'Patients', path: '/doctor/patients' }
+        ],
+        isSystemRole: false
+    },
+    {
+        name: 'Lab Technician',
+        description: 'Laboratory staff managing tests and reports',
+        permissions: [
+            'lab_view', 'lab_manage', 'patient_view'
+        ],
+        dashboardPath: '/lab/dashboard',
+        navLinks: [
+            { label: 'Dashboard', path: '/lab/dashboard' }
+        ],
+        isSystemRole: false
+    },
+    {
+        name: 'Pharmacist',
+        description: 'Pharmacy staff managing inventory and orders',
+        permissions: [
+            'pharmacy_view', 'pharmacy_manage', 'patient_view'
+        ],
+        dashboardPath: '/pharmacy/inventory',
+        navLinks: [
+            { label: 'Inventory', path: '/pharmacy/inventory' },
+            { label: 'Orders', path: '/pharmacy/orders' }
+        ],
+        isSystemRole: false
+    },
+    {
+        name: 'Receptionist',
+        description: 'Front desk staff managing appointments and patient registration',
+        permissions: [
+            'appointment_manage', 'appointment_view_all',
+            'patient_search', 'patient_create', 'patient_view',
+            'visit_intake'
+        ],
+        dashboardPath: '/reception/dashboard',
+        navLinks: [
+            { label: 'Dashboard', path: '/reception/dashboard' }
+        ],
+        isSystemRole: false
+    },
+    {
+        name: 'Patient',
+        description: 'Default role for patients/users',
+        permissions: [
+            'patient_view'
+        ],
+        dashboardPath: '/dashboard',
+        navLinks: [
+            { label: 'Services', path: '/services' },
+            { label: 'Doctors', path: '/doctors' },
+            { label: 'Appointment', path: '/appointment' },
+            { label: 'Lab Reports', path: '/lab-reports' },
+            { label: 'Dashboard', path: '/dashboard' }
+        ],
+        isSystemRole: false
+    },
+    {
+        name: 'Accountant',
+        description: 'Finance and accounting staff',
+        permissions: [
+            'finance_view', 'billing_view', 'billing_manage',
+            'patient_view', 'patient_search'
+        ],
+        dashboardPath: '/accountant/dashboard',
+        navLinks: [
+            { label: 'Finance Dashboard', path: '/accountant/dashboard' },
+            { label: 'Patient Billing', path: '/cashier/billing' }
+        ],
+        isSystemRole: false
+    },
+    {
+        name: 'Billing',
+        description: 'Dedicated patient billing and financial operations staff',
+        permissions: [
+            'billing_view', 'billing_manage', 'billing_collect_payment',
+            'billing_generate_invoice', 'billing_print_invoice', 'billing_refund',
+            'billing_reports', 'billing_analytics'
+        ],
+        dashboardPath: '/billing/dashboard',
+        navLinks: [
+            { label: 'Dashboard', path: '/billing/dashboard' },
+            { label: 'Patient Billing', path: '/billing/patient' },
+            { label: 'Pending Payments', path: '/billing/pending' },
+            { label: 'Invoices', path: '/billing/invoices' },
+            { label: 'Payment Collection', path: '/billing/collect' },
+            { label: 'Payment History', path: '/billing/history' },
+            { label: 'Refunds', path: '/billing/refunds' },
+            { label: 'Revenue Reports', path: '/billing/reports' },
+            { label: 'Billing Analytics', path: '/billing/analytics' },
+            { label: 'Invoice Templates', path: '/billing/templates' },
+            { label: 'Settings', path: '/billing/settings' }
+        ],
+        isSystemRole: false
+    },
+    {
+        name: 'Administrator',
+        description: 'Hospital administrator managing operations, staff, resources and billing oversight',
+        permissions: [
+            'administrator_view', 'administrator_manage', 'staff_manage', 'department_manage',
+            'patient_monitor', 'admission_manage', 'resource_manage', 'billing_view',
+            'reports_view', 'analytics_view', 'operations_manage'
+        ],
+        dashboardPath: '/administrator/dashboard',
+        navLinks: [
+            { label: 'Dashboard', path: '/administrator/dashboard' },
+            { label: 'Patient Flow', path: '/administrator/patient-flow' },
+            { label: 'Admissions', path: '/administrator/admissions' },
+            { label: 'Bed Management', path: '/administrator/beds' },
+            { label: 'Appointments', path: '/administrator/appointments' },
+            { label: 'Hospital Operations Center', path: '/administrator/operations' },
+            { label: 'Staff Management', path: '/administrator/staff' },
+            { label: 'Doctor Management', path: '/administrator/doctors' },
+            { label: 'Departments', path: '/administrator/departments' },
+            { label: 'Roles & Permissions', path: '/administrator/roles' },
+            { label: 'Laboratory Management', path: '/administrator/lab' },
+            { label: 'Pharmacy Management', path: '/administrator/pharmacy' },
+            { label: 'Billing Oversight', path: '/administrator/billing' },
+            { label: 'Revenue Monitoring', path: '/administrator/revenue' },
+            { label: 'Inventory Monitoring', path: '/administrator/inventory' },
+            { label: 'Resource Management', path: '/administrator/resources' },
+            { label: 'Reports', path: '/administrator/reports' },
+            { label: 'Analytics', path: '/administrator/analytics' },
+            { label: 'Audit Logs', path: '/administrator/audit-logs' },
+            { label: 'Notifications', path: '/administrator/notifications' },
+            { label: 'Settings', path: '/administrator/settings' },
+            { label: 'Profile Settings', path: '/administrator/profile-settings' }
+        ],
+        isSystemRole: false
+    }
+];
+
+async function seedDefaultRolesForHospital(hospitalId) {
+    const { syncToTenant } = require('../utils/tenantSync');
+    for (const roleData of defaultRoles) {
+        let role = await Role.findOne({ name: roleData.name, hospitalId });
+        if (!role) {
+            role = await Role.create({
+                ...roleData,
+                hospitalId,
+                isSystemRole: false
+            });
+        }
+        await syncToTenant('Role', role, 'save', hospitalId);
+    }
+}
+
 // Create a new hospital
 router.post('/', verifyCentralAdmin, async (req, res) => {
     try {
@@ -126,6 +305,8 @@ router.post('/', verifyCentralAdmin, async (req, res) => {
         const hospital = new Hospital({ name, slug, address, city, state, phone, email, website, logo, departments: departments || [], appointmentFee: appointmentFee || 500 });
         await hospital.save();
 
+        // 🏥 Seed default roles for this hospital scope in the Master DB
+        await seedDefaultRolesForHospital(hospital._id);
 
         // 🏥 Auto-provision the hospital's isolated tenant database.
         // MongoDB only physically creates a database when a document is written to it.
@@ -363,23 +544,26 @@ router.post('/admin/signup', verifyCentralAdmin, async (req, res) => {
         const existing = await User.findOne({ email });
         if (existing) return res.status(400).json({ success: false, message: 'Email already registered' });
 
-        // Find or create Admin Role for this hospital
+        // Seed all default roles for this hospital to ensure they are present
+        await seedDefaultRolesForHospital(hospitalId);
+
+        // Find the seeded Admin Role for this hospital
         let adminRole = await Role.findOne({
             hospitalId,
             name: { $regex: /^Admin$/i }
         });
 
         if (!adminRole) {
+            // Fallback (should never happen since seedDefaultRolesForHospital seeds it)
             adminRole = new Role({
                 name: `Admin`,
                 description: `Hospital admin with full management access`,
                 permissions: [
                     'admin_manage_roles', 'admin_view_stats',
-                    'patient_search', 'patient_create', 'patient_view', 'patient_edit',
-                    'appointment_view_all', 'appointment_manage',
+                    'patient_search', 'patient_view', 'patient_edit',
                     'lab_view', 'lab_manage',
                     'pharmacy_view', 'pharmacy_manage',
-                    'visit_intake', 'visit_diagnose', 'clinical_history_view'
+                    'visit_intake', 'clinical_history_view'
                 ],
                 dashboardPath: '/admin',
                 navLinks: [
@@ -405,6 +589,10 @@ router.post('/admin/signup', verifyCentralAdmin, async (req, res) => {
         });
 
         await admin.save();
+
+        // Sync hospital admin user to tenant DB
+        const { syncToTenant } = require('../utils/tenantSync');
+        await syncToTenant('User', admin, 'save', hospitalId);
 
         // Link hospital admin to hospital record
         hospital.adminUserId = admin._id;
@@ -550,7 +738,8 @@ router.put('/my-hospital/facilities', verifyHospitalAdmin, async (req, res) => {
 
         res.json({ success: true, message: 'Facilities updated successfully', hospital });
     } catch (err) {
-        res.status(500).json({ success: false, message: 'An internal error occurred' });
+        console.error('Update facilities error:', err);
+        res.status(500).json({ success: false, message: err.message || 'An internal error occurred' });
     }
 });
 

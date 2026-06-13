@@ -15,6 +15,34 @@ const DashboardSidebar = ({ isOpen, setOpen }) => {
     const { user } = useAuth();
     const { branding, hospitalName } = useBranding();
     const role = (user?.role || '').toLowerCase();
+    const location = useLocation();
+
+    // Custom active check: for links with search params (e.g. ?view=collection),
+    // match both pathname AND the specific search param.
+    // For plain links on the same path, ensure the conflicting param is NOT present.
+    const isLinkActive = (itemPath) => {
+        const [itemPathname, itemSearch] = itemPath.split('?');
+        const currentPathname = location.pathname;
+        const currentSearch = location.search;
+
+        if (itemPathname !== currentPathname) return false;
+
+        if (itemSearch) {
+            // Item has query params → current URL must also have them
+            const itemParams = new URLSearchParams(itemSearch);
+            const currentParams = new URLSearchParams(currentSearch);
+            for (const [key, val] of itemParams.entries()) {
+                if (currentParams.get(key) !== val) return false;
+            }
+            return true;
+        } else {
+            // Item has NO query params → current URL must also have no conflicting params
+            // that another sibling link might use (view=collection)
+            const currentParams = new URLSearchParams(currentSearch);
+            if (currentParams.get('view') === 'collection') return false;
+            return true;
+        }
+    };
 
     // Toggle states for Collapsible sidebar groups
     const [openGroups, setOpenGroups] = useState({
@@ -36,81 +64,76 @@ const DashboardSidebar = ({ isOpen, setOpen }) => {
     
     // Categorized Menus
     const getMenu = () => {
+        let baseMenu = [];
+
         if (role === 'centraladmin' || role === 'superadmin') {
-            return [
+            baseMenu = [
                 { label: 'System Overview', path: '/supremeadmin', icon: <FiPieChart /> },
                 { label: 'Question Library', path: '/admin/question-library', icon: <FiFileText /> },
                 { label: 'Role & Permissions', path: '/admin/roles', icon: <FiShield /> },
                 { label: 'Manage All Staff', path: '/admin/users', icon: <FiUsers /> },
             ];
-        }
-        if (role === 'hospitaladmin') {
+        } else if (role === 'hospitaladmin') {
             const u = JSON.parse(localStorage.getItem('user') || '{}');
             if (u.clinicType === 'clinic') {
                 // Simple clinic — single hub page with built-in role switcher
-                return [
+                baseMenu = [
                     { label: 'Clinic Hub', path: '/hospitaladmin', icon: <FiHome /> },
                 ];
+            } else {
+                baseMenu = [
+                    { label: 'Hospital Overview', path: '/hospitaladmin', icon: <FiPieChart /> },
+                    { label: 'Clinical Questions', path: '/hospitaladmin/question-library', icon: <FiFileText /> },
+                    { label: 'Staff Management', path: '/admin/users', icon: <FiUsers /> },
+                    { label: 'Doctors Feed', path: '/admin/doctors', icon: <FiActivity /> },
+                    { label: 'Pharma Inventory', path: '/pharmacy/inventory', icon: <FiPackage /> },
+                    { label: 'Hospital Operations Center', path: '/administrator/operations', icon: <FiActivity /> },
+                ];
             }
-            return [
-                { label: 'Hospital Overview', path: '/hospitaladmin', icon: <FiPieChart /> },
-                { label: 'Clinical Questions', path: '/hospitaladmin/question-library', icon: <FiFileText /> },
-                { label: 'Staff Management', path: '/admin/users', icon: <FiUsers /> },
-                { label: 'Doctors Feed', path: '/admin/doctors', icon: <FiActivity /> },
-                { label: 'Pharma Inventory', path: '/pharmacy/inventory', icon: <FiPackage /> },
-            ];
-        }
-        if (role === 'doctor') {
-            return [
+        } else if (role === 'doctor') {
+            baseMenu = [
                 { label: 'My Patients', path: '/doctor/dashboard', icon: <FiUsers /> },
-                { label: 'Appointments', path: '/doctor/patients', icon: <FiCalendar /> },
-                { label: 'All Cases', path: '/doctor/cases', icon: <FiClipboard /> },
             ];
-        }
-        if (role === 'reception' || role === 'receptionist') {
-            return [
+        } else if (role === 'reception' || role === 'receptionist') {
+            baseMenu = [
                 { label: 'Reception Dashboard', path: '/reception/dashboard', icon: <FiHome /> },
                 { label: 'Appointments/Booking', path: '/appointment', icon: <FiPlusSquare /> },
+                { label: 'My Daily Collection', path: '/reception/dashboard?view=collection', icon: <FiPieChart /> },
+                { label: 'Patient Billing', path: '/billing/patient', icon: <FiUsers /> },
+                { label: 'Invoices', path: '/billing/invoices', icon: <FiFileText /> },
+                { label: 'Refunds', path: '/billing/refunds', icon: <FiLogOut /> },
             ];
-        }
-        if (role === 'lab' || role === 'lab technician') {
-            return [
+        } else if (role === 'lab' || role === 'lab technician') {
+            baseMenu = [
                 { label: 'Dashboard', path: '/lab/dashboard', icon: <FiGrid /> },
                 { label: 'Lab Orders', path: '/lab/orders', icon: <FiClipboard /> },
                 { label: 'Sample Collection', path: '/lab/sample-collection', icon: <FiPlusSquare /> },
                 { label: 'Test Processing', path: '/lab/processing', icon: <FiActivity /> },
                 { label: 'Reports', path: '/lab/completed', icon: <FiFileText /> },
             ];
-        }
-        if (role === 'pharmacy' || role === 'pharmacist') {
-            return [
+        } else if (role === 'pharmacy' || role === 'pharmacist') {
+            baseMenu = [
                 { label: 'Inventory', path: '/pharmacy/inventory', icon: <FiPackage /> },
                 { label: 'Pharmacy Orders', path: '/pharmacy/orders', icon: <FiClipboard /> },
             ];
-        }
-
-        if (['cashier', 'billing', 'billing executive', 'billing manager', 'senior billing officer'].includes(role)) {
-            return [
+        } else if (['cashier', 'billing', 'billing executive', 'billing manager', 'senior billing officer'].includes(role)) {
+            baseMenu = [
                 { label: 'Billing Dashboard', path: '/billing/dashboard', icon: <FiPieChart /> },
                 { label: 'Patient Billing', path: '/billing/patient', icon: <FiUsers /> },
                 { label: 'Pending Payments', path: '/billing/pending', icon: <FiClipboard /> },
                 { label: 'Invoices', path: '/billing/invoices', icon: <FiFileText /> },
                 { label: 'Payment Collection', path: '/billing/collect', icon: <FiPlusSquare /> },
                 { label: 'Payment History', path: '/billing/history', icon: <FiDatabase /> },
-                { label: 'Refunds', path: '/billing/log-out' /* FiLogOut */, icon: <FiLogOut /> },
-                { label: 'Revenue Reports', path: '/billing/reports', icon: <FiGrid /> },
-                { label: 'Billing Analytics', path: '/billing/analytics', icon: <FiPieChart /> },
+                { label: 'Refunds', path: '/billing/refunds', icon: <FiLogOut /> },
                 { label: 'Invoice Templates', path: '/billing/templates', icon: <FiClipboard /> },
                 { label: 'Settings', path: '/billing/settings', icon: <FiSettings /> },
             ];
-        }
-        if (role === 'nurse') {
-            return [
+        } else if (role === 'nurse') {
+            baseMenu = [
                 { label: 'Patient Queue', path: '/doctor/patients', icon: <FiUsers /> },
                 { label: 'Appointments', path: '/appointment', icon: <FiCalendar /> },
             ];
-        }
-        if (role === 'administrator' || role === 'accountant') {
+        } else if (role === 'administrator' || role === 'accountant') {
             return [
                 {
                     category: '',
@@ -123,9 +146,9 @@ const DashboardSidebar = ({ isOpen, setOpen }) => {
                     items: [
                         { label: 'Patient Flow', path: '/administrator/patient-flow', icon: <FiUsers /> },
                         { label: 'Admissions', path: '/administrator/admissions', icon: <FiPlusSquare /> },
-                        { label: 'Bed Management', path: '/administrator/beds', icon: <FiDatabase /> },
+                        ...(role !== 'accountant' ? [{ label: 'Bed Management', path: '/administrator/beds', icon: <FiDatabase /> }] : []),
                         { label: 'Appointments', path: '/administrator/appointments', icon: <FiCalendar /> },
-                        { label: 'Hospital Operations Center', path: '/administrator/operations', icon: <FiActivity /> }
+                        ...(role !== 'accountant' ? [{ label: 'Hospital Operations Center', path: '/administrator/operations', icon: <FiActivity /> }] : [])
                     ]
                 },
                 {
@@ -134,7 +157,7 @@ const DashboardSidebar = ({ isOpen, setOpen }) => {
                         { label: 'Staff Management', path: '/administrator/staff', icon: <FiUsers /> },
                         { label: 'Doctor Management', path: '/administrator/doctors', icon: <FiActivity /> },
                         { label: 'Departments', path: '/administrator/departments', icon: <FiGrid /> },
-                        { label: 'Roles & Permissions', path: '/administrator/roles', icon: <FiShield /> }
+                        ...(role !== 'accountant' ? [{ label: 'Roles & Permissions', path: '/administrator/roles', icon: <FiShield /> }] : [])
                     ]
                 },
                 {
@@ -148,7 +171,9 @@ const DashboardSidebar = ({ isOpen, setOpen }) => {
                     category: 'Financial Management',
                     items: [
                         { label: 'Billing Oversight', path: '/administrator/billing', icon: <FiFileText /> },
-                        { label: 'Revenue Monitoring', path: '/administrator/revenue', icon: <FiPieChart /> }
+                        { label: 'Revenue Monitoring', path: '/administrator/revenue', icon: <FiPieChart /> },
+                        { label: 'Revenue Reports', path: '/billing/reports', icon: <FiGrid /> },
+                        { label: 'Billing Analytics', path: '/billing/analytics', icon: <FiPieChart /> }
                     ]
                 },
                 {
@@ -175,10 +200,89 @@ const DashboardSidebar = ({ isOpen, setOpen }) => {
                     ]
                 }
             ];
+        } else {
+            baseMenu = [
+                { label: 'My Dashboard', path: '/my-dashboard', icon: <FiHome /> },
+            ];
         }
-        return [
-            { label: 'My Dashboard', path: '/my-dashboard', icon: <FiHome /> },
-        ];
+
+        // Dynamically append permission-based links for non-administrator/accountant roles
+        const userPermissions = user?.effectivePermissions || user?.permissions || [];
+        const extraItems = [];
+
+        if (userPermissions.includes('billing_view') || userPermissions.includes('billing_manage')) {
+            if (role === 'accountant') {
+                extraItems.push(
+                    { label: 'Billing Dashboard', path: '/billing/dashboard', icon: <FiPieChart /> },
+                    { label: 'Revenue Reports', path: '/billing/reports', icon: <FiGrid /> },
+                    { label: 'Billing Analytics', path: '/billing/analytics', icon: <FiPieChart /> },
+                    { label: 'Invoice Templates', path: '/billing/templates', icon: <FiClipboard /> },
+                    { label: 'Settings', path: '/billing/settings', icon: <FiSettings /> }
+                );
+            } else {
+                extraItems.push(
+                    { label: 'Billing Dashboard', path: '/billing/dashboard', icon: <FiPieChart /> },
+                    { label: 'Patient Billing', path: '/billing/patient', icon: <FiUsers /> },
+                    { label: 'Pending Payments', path: '/billing/pending', icon: <FiClipboard /> },
+                    { label: 'Invoices', path: '/billing/invoices', icon: <FiFileText /> },
+                    { label: 'Payment Collection', path: '/billing/collect', icon: <FiPlusSquare /> },
+                    { label: 'Payment History', path: '/billing/history', icon: <FiDatabase /> },
+                    { label: 'Refunds', path: '/billing/refunds', icon: <FiLogOut /> },
+                    { label: 'Invoice Templates', path: '/billing/templates', icon: <FiClipboard /> },
+                    { label: 'Settings', path: '/billing/settings', icon: <FiSettings /> }
+                );
+            }
+        }
+
+        if (userPermissions.includes('lab_view') || userPermissions.includes('lab_manage')) {
+            extraItems.push(
+                { label: 'Lab Dashboard', path: '/lab/dashboard', icon: <FiGrid /> },
+                { label: 'Lab Orders', path: '/lab/orders', icon: <FiClipboard /> },
+                { label: 'Sample Collection', path: '/lab/sample-collection', icon: <FiPlusSquare /> },
+                { label: 'Test Processing', path: '/lab/processing', icon: <FiActivity /> },
+                { label: 'Lab Reports', path: '/lab/completed', icon: <FiFileText /> }
+            );
+        } else if (userPermissions.includes('lab_reports_view')) {
+            extraItems.push(
+                { label: 'Lab Reports', path: '/lab/completed', icon: <FiFileText /> }
+            );
+        }
+
+        if (userPermissions.includes('pharmacy_view') || userPermissions.includes('pharmacy_manage')) {
+            extraItems.push(
+                { label: 'Pharma Inventory', path: '/pharmacy/inventory', icon: <FiPackage /> },
+                { label: 'Pharmacy Orders', path: '/pharmacy/orders', icon: <FiClipboard /> }
+            );
+        }
+
+        if (userPermissions.includes('appointment_manage') || userPermissions.includes('appointment_view_all') || userPermissions.includes('patient_create')) {
+            extraItems.push(
+                { label: 'Reception Dashboard', path: '/reception/dashboard', icon: <FiHome /> },
+                { label: 'Appointments/Booking', path: '/appointment', icon: <FiPlusSquare /> }
+            );
+        }
+
+        if (userPermissions.includes('visit_diagnose')) {
+            extraItems.push(
+                { label: 'My Patients', path: '/doctor/dashboard', icon: <FiUsers /> }
+            );
+        }
+
+        // De-duplicate extra items by path or label, and add them to baseMenu
+        extraItems.forEach(item => {
+            const hasPath = baseMenu.some(b => b.path === item.path);
+            const hasLabel = baseMenu.some(b => b.label === item.label);
+            if (!hasPath && !hasLabel) {
+                baseMenu.push(item);
+            }
+        });
+
+        // Filter out Payment History for reception roles to prevent it from appearing anywhere in their sidebar
+        if (role === 'reception' || role === 'receptionist') {
+            baseMenu = baseMenu.filter(item => item.path !== '/billing/history');
+        }
+
+        return baseMenu;
     };
 
     const menuItems = getMenu();
@@ -240,10 +344,10 @@ const DashboardSidebar = ({ isOpen, setOpen }) => {
                     })
                 ) : (
                     menuItems.map((item, idx) => (
-                        <NavLink 
-                            key={idx} 
-                            to={item.path} 
-                            className={({ isActive }) => `sidebar-link ${isActive ? 'active' : ''}`}
+                        <NavLink
+                            key={idx}
+                            to={item.path}
+                            className={() => `sidebar-link ${isLinkActive(item.path) ? 'active' : ''}`}
                         >
                             <span className="sidebar-link-icon">{item.icon}</span>
                             <span className="sidebar-link-text">{item.label}</span>

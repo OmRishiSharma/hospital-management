@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { doctorAPI } from '../../utils/api';
+import socket from '../../utils/socket';
 import './DoctorDashboard.css';
 
 const DoctorDashboard = () => {
@@ -53,8 +54,20 @@ const DoctorDashboard = () => {
             return;
         }
         fetchDashboardData();
-        const interval = setInterval(() => fetchDashboardData(), 30000);
-        return () => clearInterval(interval);
+
+        const handleLiveRefresh = () => {
+            fetchDashboardData(dateTab);
+        };
+
+        socket.on('appointment_created', handleLiveRefresh);
+        socket.on('appointment_updated', handleLiveRefresh);
+        socket.on('patient_status_changed', handleLiveRefresh);
+
+        return () => {
+            socket.off('appointment_created', handleLiveRefresh);
+            socket.off('appointment_updated', handleLiveRefresh);
+            socket.off('patient_status_changed', handleLiveRefresh);
+        };
     }, [dateTab, isClinicDoctor, navigate]);
 
     const tabApts = appointments;

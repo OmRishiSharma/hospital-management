@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { useNavigate, useLocation, useSearchParams } from 'react-router-dom';
 import { receptionAPI, publicAPI, hospitalAPI, uploadAPI, admissionAPI } from '../../utils/api';
 import socket from '../../utils/socket';
 import { useAuth } from '../../store/hooks';
@@ -7,6 +7,20 @@ import { getSubdomain } from '../../utils/subdomain';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import './ReceptionDashboard.css';
+
+// Standard ward → bed mapping for dropdown selection
+const FALLBACK_WARD_BED_MAP = {
+    'General Ward':    ['G-01','G-02','G-03','G-04','G-05','G-06','G-07','G-08'],
+    'ICU':             ['ICU-1','ICU-2','ICU-3','ICU-4','ICU-5','ICU-6'],
+    'NICU':            ['NICU-1','NICU-2','NICU-3','NICU-4'],
+    'CCU':             ['CCU-1','CCU-2','CCU-3','CCU-4'],
+    'Paediatric Ward': ['P-01','P-02','P-03','P-04','P-05'],
+    'Maternity Ward':  ['M-01','M-02','M-03','M-04','M-05','M-06'],
+    'Orthopaedic Ward':['O-01','O-02','O-03','O-04','O-05'],
+    'Surgical Ward':   ['S-01','S-02','S-03','S-04','S-05','S-06'],
+    'Emergency Ward':  ['ER-1','ER-2','ER-3','ER-4'],
+    'Private Room':    ['PR-101','PR-102','PR-103','PR-104','PR-105','PR-106','PR-107','PR-108'],
+};
 
 const timeSlots = [
     '09:00', '09:30', '10:00', '10:30', '11:00', '11:30',
@@ -16,11 +30,17 @@ const timeSlots = [
 
 const ReceptionDashboard = () => {
     const navigate = useNavigate();
+    const location = useLocation();
+    const [searchParams] = useSearchParams();
     const { user: currentUser } = useAuth();
     const [appointments, setAppointments] = useState([]);
     const [doctorsList, setDoctorsList] = useState([]);
     const [loading, setLoading] = useState(true);
-    const [viewMode, setViewMode] = useState('dashboard');
+    const [viewMode, setViewMode] = useState(
+        location.state?.openIntake ? 'intake' :
+        searchParams.get('view') === 'collection' ? 'transactions' :
+        'dashboard'
+    );
     const [selectedPatientId, setSelectedPatientId] = useState(null);
     const [saving, setSaving] = useState(false);
     const [searchQuery, setSearchQuery] = useState('');
@@ -29,6 +49,11 @@ const ReceptionDashboard = () => {
     const [profileAppointments, setProfileAppointments] = useState([]);
     const [transactions, setTransactions] = useState([]);
 
+    // Patient name autocomplete in intake form
+    const [nameSuggestions, setNameSuggestions] = useState([]);
+    const [showNameSuggestions, setShowNameSuggestions] = useState(false);
+    const nameSearchTimerRef = useRef(null);
+
     // Token mode — next token preview
     const [nextToken, setNextToken] = useState(null);
 
@@ -36,9 +61,8 @@ const ReceptionDashboard = () => {
     const [paymentModal, setPaymentModal] = useState({ open: false, appointment: null, method: 'Cash' });
     const [confirmingPayment, setConfirmingPayment] = useState(false);
 
-    // Hospitalization modal
     const [hospitalizeModal, setHospitalizeModal] = useState({ open: false, appointment: null });
-    const [hospitalizeForm, setHospitalizeForm] = useState({ ward: '', bedNumber: '', admissionDate: new Date().toISOString().split('T')[0], notes: '', facilityDays: {} });
+    const [hospitalizeForm, setHospitalizeForm] = useState({ ward: '', bedNumber: '', privateRoom: false, admissionDate: new Date().toISOString().split('T')[0], notes: '', facilityDays: {} });
     const [hospitalizingSaving, setHospitalizingSaving] = useState(false);
 
     // Admitted Patients Section
@@ -51,7 +75,7 @@ const ReceptionDashboard = () => {
     const [admissionStatusTab, setAdmissionStatusTab] = useState('active');
     // Edit ward/bed modal
     const [editAdmissionModal, setEditAdmissionModal] = useState({ open: false, admission: null });
-    const [editAdmissionForm, setEditAdmissionForm] = useState({ ward: '', bedNumber: '', notes: '', admissionDate: '' });
+    const [editAdmissionForm, setEditAdmissionForm] = useState({ ward: '', bedNumber: '', privateRoom: false, notes: '', admissionDate: '', dailyWardCharge: '' });
     const [editAdmissionSaving, setEditAdmissionSaving] = useState(false);
     // Payment collect modal (before discharge)
     const [collectPaymentModal, setCollectPaymentModal] = useState({ open: false, admission: null, method: 'Cash' });
@@ -61,6 +85,13 @@ const ReceptionDashboard = () => {
     const [availabilityCheck, setAvailabilityCheck] = useState({
         doctorId: '', date: new Date().toISOString().split('T')[0], bookedSlots: []
     });
+
+    // Rescheduling states
+    const [rescheduleModal, setRescheduleModal] = useState({ open: false, appointment: null });
+    const [rescheduleForm, setRescheduleForm] = useState({ date: '', time: '' });
+    const [rescheduleBookedSlots, setRescheduleBookedSlots] = useState([]);
+    const [rescheduleAvailableTimes, setRescheduleAvailableTimes] = useState([]);
+    const [parentAppointmentId, setParentAppointmentId] = useState(null);
 
     // SIMPLIFIED INTAKE STATE (Removed medical history)
     const [intakeForm, setIntakeForm] = useState({
@@ -82,12 +113,47 @@ const ReceptionDashboard = () => {
     });
 
     const [paymentScreenshot, setPaymentScreenshot] = useState(null);
+    const [selectedPastReports, setSelectedPastReports] = useState([]);
+    const [newReportName, setNewReportName] = useState('');
+    const [newReportFile, setNewReportFile] = useState(null);
+
+    const handleAddPastReportToList = () => {
+        if (!newReportFile) {
+            alert("Please select a report file first.");
+            return;
+        }
+        const nameToUse = newReportName.trim() || newReportFile.name;
+        setSelectedPastReports(prev => [...prev, { file: newReportFile, name: nameToUse }]);
+        setNewReportFile(null);
+        setNewReportName('');
+        const fileEl = document.getElementById('past-report-file-picker');
+        if (fileEl) fileEl.value = '';
+    };
+
+    const handleRemovePastReportFromList = (idxToRemove) => {
+        setSelectedPastReports(prev => prev.filter((_, idx) => idx !== idxToRemove));
+    };
+
     const [verifyingAadhaar, setVerifyingAadhaar] = useState(false);
     const [otpSent, setOtpSent] = useState(false);
     const [aadhaarOtp, setAadhaarOtp] = useState('');
     const [hospitalContext, setHospitalContext] = useState(null);
+
+    const WARD_BED_MAP = useMemo(() => {
+        if (!hospitalContext?.facilities || hospitalContext.facilities.length === 0) return FALLBACK_WARD_BED_MAP;
+        const map = {};
+        hospitalContext.facilities.forEach(fac => {
+            const count = fac.bedCount || 0;
+            if (count > 0) {
+                const prefix = fac.name.substring(0, 3).toUpperCase();
+                map[fac.name] = Array.from({ length: count }, (_, i) => `${prefix}-${i + 1}`);
+            } else {
+                map[fac.name] = [];
+            }
+        });
+        return map;
+    }, [hospitalContext]);
     const [statusFilter, setStatusFilter] = useState('all');
-    const [refreshInterval, setRefreshInterval] = useState(null);
     const getLocalDateString = (d = new Date()) => {
         const offset = d.getTimezoneOffset();
         const localDate = new Date(d.getTime() - (offset * 60 * 1000));
@@ -111,7 +177,7 @@ const ReceptionDashboard = () => {
         .reduce((sum, a) => sum + (Number(a.amount) || 0), 0);
     const totalUniquePatients = new Set(appointments.map(a => a.userId?._id || a.patientId).filter(Boolean)).size;
 
-    const filteredAppointments = statusFilter === 'all'
+    const filteredAppointments = (statusFilter === 'all' || statusFilter === 'report_follow_up')
         ? appointments
         : appointments.filter(a => a.status === statusFilter);
 
@@ -122,16 +188,40 @@ const ReceptionDashboard = () => {
         return 'Good Evening';
     };
 
-    const fetchAppointments = async (dateVal, futureVal, tomorrowVal) => {
+    const fetchAppointments = async (dateVal, futureVal, tomorrowVal, isReportFollowUp) => {
         setLoading(true);
         try {
-            const isFuture = futureVal !== undefined ? futureVal : dateTab === 'future';
-            const isTomorrow = tomorrowVal !== undefined ? tomorrowVal : dateTab === 'tomorrow';
-            const targetDate = (isFuture || isTomorrow) ? '' : (dateVal || selectedQueueDate);
-            const response = await receptionAPI.getAllAppointments(targetDate, isFuture, isTomorrow);
+            const isFollowUp = isReportFollowUp !== undefined ? isReportFollowUp : statusFilter === 'report_follow_up';
+            let response;
+            if (isFollowUp) {
+                response = await receptionAPI.getAllAppointments('', false, false, false, true);
+            } else {
+                const isFuture = futureVal !== undefined ? futureVal : dateTab === 'future';
+                const isTomorrow = tomorrowVal !== undefined ? tomorrowVal : dateTab === 'tomorrow';
+                const targetDate = (isFuture || isTomorrow) ? '' : (dateVal || selectedQueueDate);
+                response = await receptionAPI.getAllAppointments(targetDate, isFuture, false, isTomorrow);
+            }
             if (response.success) setAppointments(response.appointments);
         } catch (err) { console.error(err); } finally { setLoading(false); }
     };
+
+    useEffect(() => {
+        if (location.state?.openIntake) {
+            setViewMode('intake');
+            // Clear the state so refreshing doesn't keep opening it
+            navigate(location.pathname, { replace: true, state: {} });
+        }
+    }, [location.state, navigate]);
+
+    useEffect(() => {
+        const viewParam = searchParams.get('view');
+        if (viewParam === 'collection') {
+            setViewMode('transactions');
+        } else if (!viewParam && location.pathname === '/reception/dashboard') {
+            // Sidebar "Reception Dashboard" click navigates here without params — reset if on collection view
+            setViewMode(prev => (prev === 'transactions' ? 'dashboard' : prev));
+        }
+    }, [searchParams, location.pathname]);
 
     useEffect(() => {
         const fetchHospital = async () => {
@@ -145,6 +235,7 @@ const ReceptionDashboard = () => {
         fetchAppointments(selectedQueueDate, dateTab === 'future', dateTab === 'tomorrow');
         fetchDoctors();
         fetchAdmissions();
+        fetchTransactions();
     }, []);
 
     // Listen to real-time socket notifications to refresh queues instantly
@@ -153,6 +244,7 @@ const ReceptionDashboard = () => {
             if (notif.referenceType === 'ClinicalVisit' || notif.message?.includes('admission') || notif.message?.includes('admit')) {
                 fetchAppointments(selectedQueueDate, dateTab === 'future', dateTab === 'tomorrow');
                 fetchAdmissions();
+                fetchTransactions();
                 if (statusFilter === 'completed') {
                     fetchCompletedPatients();
                 }
@@ -174,6 +266,7 @@ const ReceptionDashboard = () => {
             // Background re-fetch to ensure data is fully in sync
             fetchAdmissions();
             fetchAppointments(selectedQueueDate, dateTab === 'future', dateTab === 'tomorrow');
+            fetchTransactions();
             if (statusFilter === 'completed') fetchCompletedPatients();
         };
 
@@ -183,6 +276,7 @@ const ReceptionDashboard = () => {
             }
             fetchAdmissions();
             fetchAppointments(selectedQueueDate, dateTab === 'future', dateTab === 'tomorrow');
+            fetchTransactions();
             if (statusFilter === 'completed') fetchCompletedPatients();
         };
 
@@ -192,6 +286,14 @@ const ReceptionDashboard = () => {
             }
             fetchAdmissions();
             fetchAppointments(selectedQueueDate, dateTab === 'future', dateTab === 'tomorrow');
+            fetchTransactions();
+            if (statusFilter === 'completed') fetchCompletedPatients();
+        };
+
+        const handleLiveRefresh = () => {
+            fetchAppointments(selectedQueueDate, dateTab === 'future', dateTab === 'tomorrow');
+            fetchAdmissions();
+            fetchTransactions();
             if (statusFilter === 'completed') fetchCompletedPatients();
         };
 
@@ -199,12 +301,26 @@ const ReceptionDashboard = () => {
         socket.on('admission_created', handleAdmissionCreated);
         socket.on('admission_updated', handleAdmissionUpdated);
         socket.on('admission_discharged', handleAdmissionDischarged);
+        socket.on('invoice_generated', handleLiveRefresh);
+        socket.on('payment_received', handleLiveRefresh);
+        socket.on('invoice_paid', handleLiveRefresh);
+        socket.on('refund_processed', handleLiveRefresh);
+        socket.on('appointment_created', handleLiveRefresh);
+        socket.on('appointment_updated', handleLiveRefresh);
+        socket.on('patient_status_changed', handleLiveRefresh);
 
         return () => {
             socket.off('new_notification', handleNewNotification);
             socket.off('admission_created', handleAdmissionCreated);
             socket.off('admission_updated', handleAdmissionUpdated);
             socket.off('admission_discharged', handleAdmissionDischarged);
+            socket.off('invoice_generated', handleLiveRefresh);
+            socket.off('payment_received', handleLiveRefresh);
+            socket.off('invoice_paid', handleLiveRefresh);
+            socket.off('refund_processed', handleLiveRefresh);
+            socket.off('appointment_created', handleLiveRefresh);
+            socket.off('appointment_updated', handleLiveRefresh);
+            socket.off('patient_status_changed', handleLiveRefresh);
         };
     }, [selectedQueueDate, dateTab, statusFilter]);
 
@@ -212,6 +328,10 @@ const ReceptionDashboard = () => {
     useEffect(() => {
         if (statusFilter === 'completed') {
             fetchCompletedPatients();
+        } else if (statusFilter === 'report_follow_up') {
+            fetchAppointments(undefined, undefined, undefined, true);
+        } else {
+            fetchAppointments(selectedQueueDate, dateTab === 'future', dateTab === 'tomorrow', false);
         }
     }, [statusFilter]);
 
@@ -220,6 +340,63 @@ const ReceptionDashboard = () => {
             fetchBookedSlots(availabilityCheck.doctorId, availabilityCheck.date);
         }
     }, [availabilityCheck.doctorId, availabilityCheck.date]);
+
+    // Load booked slots when rescheduling doctor/date changes
+    useEffect(() => {
+        const fetchSlots = async () => {
+            if (rescheduleModal.appointment && rescheduleForm.date) {
+                try {
+                    const hospitalId = hospitalContext?._id || '';
+                    const res = await receptionAPI.getBookedSlots(rescheduleModal.appointment.doctorId?._id || rescheduleModal.appointment.doctorId, rescheduleForm.date, hospitalId);
+                    if (res.success) {
+                        setRescheduleBookedSlots(res.bookedSlots || []);
+                    }
+                } catch (err) {
+                    console.error(err);
+                }
+            }
+        };
+        fetchSlots();
+    }, [rescheduleModal.appointment, rescheduleForm.date, hospitalContext]);
+
+    // Available times logic for Rescheduling
+    useEffect(() => {
+        if (!rescheduleForm.date || !rescheduleModal.appointment) return;
+        const baseTimes = [
+            '09:00', '09:30', '10:00', '10:30', '11:00', '11:30',
+            '12:00', '12:30', '14:00', '14:30', '15:00', '15:30',
+            '16:00', '16:30', '17:00', '17:30'
+        ];
+        let times = baseTimes.filter(t => !rescheduleBookedSlots.includes(t));
+
+        const doctorId = rescheduleModal.appointment.doctorId?._id || rescheduleModal.appointment.doctorId;
+        if (doctorId && doctorsList.length > 0) {
+            const doctor = doctorsList.find(d => d._id === doctorId);
+            if (doctor && doctor.availability) {
+                const dateObj = new Date(rescheduleForm.date);
+                const days = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+                const dayName = days[dateObj.getDay()];
+                const schedule = doctor.availability[dayName];
+                if (schedule && schedule.available === false) {
+                    setRescheduleAvailableTimes([]);
+                    return;
+                }
+                if (schedule && schedule.startTime && schedule.endTime) {
+                    const getMin = (t) => {
+                        const [h, m] = t.split(':').map(Number);
+                        return h * 60 + m;
+                    };
+                    const start = getMin(schedule.startTime);
+                    const end = getMin(schedule.endTime);
+                    times = times.filter(t => {
+                        const m = getMin(t);
+                        return m >= start && m < end;
+                    });
+                }
+            }
+        }
+        setRescheduleAvailableTimes(times);
+    }, [rescheduleForm.date, rescheduleBookedSlots, rescheduleModal.appointment, doctorsList]);
 
     // Sync Form with Widget
     useEffect(() => {
@@ -244,15 +421,7 @@ const ReceptionDashboard = () => {
             .catch(() => setNextToken(null));
     }, [intakeForm.doctor, intakeForm.visitDate, hospitalContext]);
 
-    // Auto-refresh every 30 seconds for live queue updates
-    useEffect(() => {
-        const interval = setInterval(() => {
-            fetchAppointments(selectedQueueDate, dateTab === 'future', dateTab === 'tomorrow');
-            fetchTransactions();
-        }, 30000);
-        setRefreshInterval(interval);
-        return () => clearInterval(interval);
-    }, [selectedQueueDate, dateTab]);
+    // Auto-refresh interval removed in favor of real-time socket events
 
     const fetchTransactions = async () => {
         try {
@@ -324,6 +493,7 @@ const ReceptionDashboard = () => {
         setOtpSent(false);
         setAadhaarOtp('');
         setVerifyingAadhaar(false);
+        setParentAppointmentId(null);
         setIntakeForm({
             title: 'Mrs.', firstName: '', middleName: '', lastName: '',
             dob: '', age: '', gender: 'Female', mobile: '', email: '',
@@ -342,6 +512,7 @@ const ReceptionDashboard = () => {
         setOtpSent(false);
         setAadhaarOtp('');
         setVerifyingAadhaar(false);
+        setParentAppointmentId(null);
         const p = patient.fertilityProfile || {};
         const getVal = (val) => val || '';
 
@@ -360,6 +531,49 @@ const ReceptionDashboard = () => {
         setViewMode('intake');
     };
 
+    const handleScheduleFollowUp = (apt) => {
+        const patient = apt.userId || {
+            name: apt.patientName || '',
+            phone: apt.patientPhone || '',
+            email: apt.patientEmail || '',
+            gender: apt.patientGender || 'Male',
+            dob: apt.patientDob || '',
+            _id: apt.userId || apt.patientId
+        };
+        setSelectedPatientId(patient._id);
+        setOtpSent(false);
+        setAadhaarOtp('');
+        setVerifyingAadhaar(false);
+        const p = patient.fertilityProfile || {};
+        const getVal = (val) => val || '';
+
+        const doctorId = apt.doctorId?._id || apt.doctorId;
+        const doctor = doctorsList.find(d => d._id === doctorId);
+        const dept = doctor ? (doctor.departments?.[0] || doctor.specialty || doctor.specialization || '') : '';
+
+        setIntakeForm(prev => ({
+            ...prev,
+            firstName: getVal(patient.name).split(' ')[0],
+            lastName: getVal(patient.name).split(' ').slice(1).join(' '),
+            mobile: getVal(patient.phone),
+            email: getVal(patient.email),
+            gender: getVal(patient.gender || 'Female'),
+            dob: getVal(patient.dob ? new Date(patient.dob).toISOString().split('T')[0] : ''),
+            aadhaar: p.aadhaar || '',
+            isAadhaarVerified: p.aadhaar ? true : false,
+            ...p,
+            consultationFee: hospitalContext?.appointmentFee ?? '500',
+            department: dept,
+            doctor: doctorId,
+            visitDate: new Date().toISOString().split('T')[0],
+            visitTime: '',
+            reasonForVisit: 'Report Review Follow-up',
+            paymentMethod: 'Cash'
+        }));
+        setParentAppointmentId(apt._id);
+        setViewMode('intake');
+    };
+
     const handleViewProfile = (patient) => {
         navigate(`/patient/${patient._id}`);
     };
@@ -368,6 +582,7 @@ const ReceptionDashboard = () => {
         setHospitalizeForm({
             ward: '',
             bedNumber: '',
+            privateRoom: false,
             admissionDate: new Date().toISOString().split('T')[0],
             notes: apt.recommendAdmissionNotes ? `Doctor Recommendation: ${apt.recommendAdmissionNotes}` : '',
             facilityDays: {}
@@ -403,9 +618,11 @@ const ReceptionDashboard = () => {
                 appointmentId: appointment._id,
                 ward: hospitalizeForm.ward,
                 bedNumber: hospitalizeForm.bedNumber,
+                privateRoom: hospitalizeForm.privateRoom || false,
                 admissionDate: hospitalizeForm.admissionDate,
                 notes: hospitalizeForm.notes,
                 selectedFacilities,
+                dailyWardCharge: hospitalizeForm.dailyWardCharge || 0,
             });
             setHospitalizeModal({ open: false, appointment: null });
             // Refresh admissions list and switch to admitted view
@@ -454,8 +671,10 @@ const ReceptionDashboard = () => {
             await admissionAPI.updateAdmission(admission._id, {
                 ward: editAdmissionForm.ward,
                 bedNumber: editAdmissionForm.bedNumber,
+                privateRoom: editAdmissionForm.privateRoom || false,
                 notes: editAdmissionForm.notes,
                 admissionDate: editAdmissionForm.admissionDate,
+                dailyWardCharge: editAdmissionForm.dailyWardCharge,
             });
             setEditAdmissionModal({ open: false, admission: null });
             await fetchAdmissions();
@@ -642,6 +861,31 @@ const ReceptionDashboard = () => {
         }
     };
 
+    const submitReschedule = async (e) => {
+        e.preventDefault();
+        if (!rescheduleForm.date || !rescheduleForm.time) {
+            alert('Please select both date and time.');
+            return;
+        }
+        try {
+            const res = await receptionAPI.rescheduleAppointment(
+                rescheduleModal.appointment._id,
+                rescheduleForm.date,
+                rescheduleForm.time
+            );
+            if (res.success) {
+                alert('Appointment rescheduled successfully.');
+                setRescheduleModal({ open: false, appointment: null });
+                fetchAppointments();
+            } else {
+                alert(res.message || 'Reschedule failed.');
+            }
+        } catch (err) {
+            console.error(err);
+            alert('Error rescheduling appointment.');
+        }
+    };
+
     const handleSearch = async (e) => {
         const query = e.target.value;
         setSearchQuery(query);
@@ -692,7 +936,63 @@ const ReceptionDashboard = () => {
                 return;
             }
         }
+
+        // Patient name autocomplete — search on firstName typing
+        if (name === 'firstName') {
+            setIntakeForm(prev => ({ ...prev, [name]: value }));
+            if (nameSearchTimerRef.current) clearTimeout(nameSearchTimerRef.current);
+            if (value.trim().length >= 2) {
+                nameSearchTimerRef.current = setTimeout(async () => {
+                    try {
+                        const res = await receptionAPI.searchPatients(value.trim());
+                        if (res.success && res.patients?.length > 0) {
+                            setNameSuggestions(res.patients);
+                            setShowNameSuggestions(true);
+                        } else {
+                            setNameSuggestions([]);
+                            setShowNameSuggestions(false);
+                        }
+                    } catch { setNameSuggestions([]); setShowNameSuggestions(false); }
+                }, 300);
+            } else {
+                setNameSuggestions([]);
+                setShowNameSuggestions(false);
+            }
+            return;
+        }
+
         setIntakeForm(prev => ({ ...prev, [name]: value }));
+    };
+
+    // Fill intake form from an existing patient suggestion
+    const handleSelectPatientSuggestion = (patient) => {
+        const fp = patient.fertilityProfile || {};
+        const nameParts = (patient.name || '').split(' ');
+        const firstName = nameParts[0] || '';
+        const lastName = nameParts.slice(1).join(' ') || '';
+        setSelectedPatientId(patient._id);
+        setIntakeForm(prev => ({
+            ...prev,
+            firstName,
+            lastName,
+            mobile: patient.phone || fp.mobile || '',
+            email: patient.email || '',
+            age: fp.age || '',
+            gender: fp.gender || prev.gender,
+            address: fp.address || patient.address || '',
+            aadhaar: fp.aadhaar || '',
+            isAadhaarVerified: !!fp.aadhaar,
+            height: fp.height || '',
+            weight: fp.weight || '',
+            bmi: fp.bmi || '',
+            bloodGroup: fp.bloodGroup || '',
+            partnerFirstName: fp.partnerFirstName || '',
+            partnerLastName: fp.partnerLastName || '',
+            partnerMobile: fp.partnerMobile || '',
+            consultationFee: hospitalContext?.appointmentFee ?? prev.consultationFee,
+        }));
+        setNameSuggestions([]);
+        setShowNameSuggestions(false);
     };
 
     const handleSendOTP = async () => {
@@ -768,6 +1068,7 @@ const ReceptionDashboard = () => {
                 name: `${intakeForm.firstName} ${intakeForm.lastName}`.trim(),
                 email: intakeForm.email,
                 phone: intakeForm.mobile,
+                autoCreateAppointment: !(intakeForm.doctor && intakeForm.visitDate)
             });
 
             if (regRes.success && regRes.user) {
@@ -778,6 +1079,28 @@ const ReceptionDashboard = () => {
 
             // 2. Update Profile (Vitals + Basic Info + Aadhaar)
             await receptionAPI.updateIntake(userId, intakeForm);
+
+            // 2.5 Upload any previous hospital reports if present
+            const reportsToUpload = [...selectedPastReports];
+            if (newReportFile) {
+                const nameToUse = newReportName.trim() || newReportFile.name;
+                reportsToUpload.push({ file: newReportFile, name: nameToUse });
+            }
+
+            if (reportsToUpload.length > 0) {
+                for (const report of reportsToUpload) {
+                    try {
+                        await receptionAPI.uploadPastReport(userId, report.file, report.name);
+                    } catch (uploadErr) {
+                        console.error("Failed to upload past report", report.name, uploadErr);
+                    }
+                }
+                setSelectedPastReports([]);
+                setNewReportFile(null);
+                setNewReportName('');
+                const fileEl = document.getElementById('past-report-file-picker');
+                if (fileEl) fileEl.value = '';
+            }
 
             // 3. Book Appointment (optional when editing existing patient)
             const isTokenMode = hospitalContext?.appointmentMode === 'token';
@@ -803,10 +1126,12 @@ const ReceptionDashboard = () => {
                     notes: `Walk-in. Vitals: ${intakeForm.height}cm/${intakeForm.weight}kg. Reason: ${intakeForm.reasonForVisit}${screenshotNote}`,
                     paymentMethod: intakeForm.paymentMethod,
                     paymentStatus: 'Paid',
-                    amount: intakeForm.consultationFee
+                    amount: intakeForm.consultationFee,
+                    parentAppointmentId: parentAppointmentId
                 });
 
                 if (bookingRes.success) {
+                    setParentAppointmentId(null);
                     // --- Dynamic Receipt PDF (generate BEFORE alert so it isn't blocked) ---
                     const doc = new jsPDF();
                     const hName = hospitalContext?.name || 'HOSPITAL';
@@ -877,7 +1202,7 @@ const ReceptionDashboard = () => {
                     const targetDate = intakeForm.visitDate || new Date().toISOString().split('T')[0];
                     const tomVal = new Date(); tomVal.setDate(tomVal.getDate() + 1);
                     const tomStrVal = tomVal.toISOString().split('T')[0];
-                    
+
                     setDateTab(targetDate === todayStr ? 'today' : targetDate === tomStrVal ? 'tomorrow' : 'custom');
                     setSelectedQueueDate(targetDate);
                     setPaymentScreenshot(null);
@@ -906,7 +1231,7 @@ const ReceptionDashboard = () => {
             <div className="intake-full-page">
                 <div className="context-bar">
                     <h3>{selectedPatientId ? 'Edit Patient Details' : 'New Registration'}</h3>
-                    <button className="btn-cancel" onClick={() => setViewMode('dashboard')}>Close ✖</button>
+                    <button className="btn-cancel" onClick={() => { setViewMode('dashboard'); setParentAppointmentId(null); }}>Close ✖</button>
                 </div>
                 <div className="intake-container">
                     <form onSubmit={handleSave}>
@@ -996,7 +1321,62 @@ const ReceptionDashboard = () => {
                             </div>
 
                             <div className="form-row" style={{ marginTop: '10px' }}>
-                                <div className="field"><label>First Name</label><input name="firstName" value={intakeForm.firstName} onChange={handleInputChange} /></div>
+                                <div className="field" style={{ position: 'relative' }}>
+                                    <label>First Name</label>
+                                    <input
+                                        name="firstName"
+                                        value={intakeForm.firstName}
+                                        onChange={handleInputChange}
+                                        onBlur={() => setTimeout(() => setShowNameSuggestions(false), 180)}
+                                        autoComplete="off"
+                                        placeholder="Type to search existing patients..."
+                                    />
+                                    {showNameSuggestions && nameSuggestions.length > 0 && (
+                                        <div style={{
+                                            position: 'absolute', top: '100%', left: 0, right: 0,
+                                            background: '#fff', border: '1.5px solid #6366f1',
+                                            borderRadius: '10px', boxShadow: '0 8px 24px rgba(99,102,241,0.15)',
+                                            zIndex: 9999, maxHeight: '220px', overflowY: 'auto',
+                                            marginTop: '4px'
+                                        }}>
+                                            <div style={{ padding: '8px 14px 4px', fontSize: '0.72rem', color: '#6366f1', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em', borderBottom: '1px solid #e0e7ff' }}>
+                                                🔍 Existing Patients
+                                            </div>
+                                            {nameSuggestions.map((p, idx) => (
+                                                <div
+                                                    key={p._id || idx}
+                                                    onMouseDown={() => handleSelectPatientSuggestion(p)}
+                                                    style={{
+                                                        padding: '10px 14px', cursor: 'pointer',
+                                                        display: 'flex', alignItems: 'center', gap: '10px',
+                                                        borderBottom: idx < nameSuggestions.length - 1 ? '1px solid #f1f5f9' : 'none',
+                                                        transition: 'background 0.15s'
+                                                    }}
+                                                    onMouseEnter={e => e.currentTarget.style.background = '#eff6ff'}
+                                                    onMouseLeave={e => e.currentTarget.style.background = '#fff'}
+                                                >
+                                                    <div style={{
+                                                        width: '34px', height: '34px', borderRadius: '50%',
+                                                        background: 'linear-gradient(135deg, #6366f1, #8b5cf6)',
+                                                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                                        color: '#fff', fontWeight: 800, fontSize: '0.9rem', flexShrink: 0
+                                                    }}>
+                                                        {(p.name || 'P')[0].toUpperCase()}
+                                                    </div>
+                                                    <div>
+                                                        <div style={{ fontWeight: 700, fontSize: '0.9rem', color: '#1e293b' }}>{p.name}</div>
+                                                        <div style={{ fontSize: '0.75rem', color: '#64748b' }}>
+                                                            📱 {p.phone || '-'} &nbsp;•&nbsp; MRN: {p.patientId || 'N/A'}
+                                                        </div>
+                                                    </div>
+                                                    <div style={{ marginLeft: 'auto', fontSize: '0.72rem', color: '#6366f1', fontWeight: 600, whiteSpace: 'nowrap' }}>
+                                                        ✓ Select
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    )}
+                                </div>
                                 <div className="field"><label>Last Name</label><input name="lastName" value={intakeForm.lastName} onChange={handleInputChange} /></div>
                                 <div className="field"><label>Mobile</label><input type="tel" name="mobile" value={intakeForm.mobile} onChange={handleInputChange} maxLength={10} /></div>
                                 <div className="field"><label>Age</label><input name="age" value={intakeForm.age} onChange={handleInputChange} /></div>
@@ -1055,9 +1435,15 @@ const ReceptionDashboard = () => {
                             <h4>3. Assign to Doctor/Counselor</h4>
                             <div className="form-row">
                                 <div className="field">
-                                    <label>Department</label>
-                                    <select name="department" value={intakeForm.department} onChange={handleInputChange}>
-                                        <option value="">-- Choose Department --</option>
+                                    <label>Department / Clinic</label>
+                                    <select
+                                        name="department"
+                                        value={intakeForm.department}
+                                        onChange={handleInputChange}
+                                        disabled={!!parentAppointmentId}
+                                        style={parentAppointmentId ? { backgroundColor: '#f1f5f9', cursor: 'not-allowed' } : {}}
+                                    >
+                                        <option value="">-- Choose Clinic --</option>
                                         {[...new Set([
                                             ...(hospitalContext?.departments || []),
                                             ...doctorsList.flatMap(d => [
@@ -1072,12 +1458,12 @@ const ReceptionDashboard = () => {
                                 </div>
                                 <div className="field">
                                     <label>Select Specialist</label>
-                                    <select 
-                                        name="doctor" 
-                                        value={intakeForm.doctor} 
+                                    <select
+                                        name="doctor"
+                                        value={intakeForm.doctor}
                                         onChange={handleInputChange}
-                                        disabled={!intakeForm.department}
-                                        style={!intakeForm.department ? { backgroundColor: '#f1f5f9', cursor: 'not-allowed' } : {}}
+                                        disabled={!intakeForm.department || !!parentAppointmentId}
+                                        style={(!intakeForm.department || parentAppointmentId) ? { backgroundColor: '#f1f5f9', cursor: 'not-allowed' } : {}}
                                     >
                                         {!intakeForm.department ? (
                                             <option value="">-- Select Department First --</option>
@@ -1150,6 +1536,63 @@ const ReceptionDashboard = () => {
                                     </div>
                                 )
                             )}
+                        </div>
+
+                        <div className="form-section" style={{ backgroundColor: '#faf5ff', border: '1px solid #e9d5ff' }}>
+                            <h4 style={{ color: '#6b21a8' }}>4. Previous Hospital Reports</h4>
+                            
+                            {/* Selected files preview */}
+                            {selectedPastReports.length > 0 && (
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: '16px', background: '#fdf4ff', padding: '12px', borderRadius: '8px', border: '1px solid #f3e8ff' }}>
+                                    <div style={{ fontSize: '0.8rem', color: '#6b21a8', fontWeight: 'bold' }}>Files Queued to Upload:</div>
+                                    {selectedPastReports.map((report, idx) => (
+                                        <div key={idx} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '6px 12px', background: 'white', borderRadius: '6px', border: '1px solid #e9d5ff', fontSize: '13px' }}>
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                                <span>📄</span>
+                                                <strong style={{ color: '#1e293b' }}>{report.name}</strong>
+                                                <span style={{ color: '#64748b', fontSize: '11px' }}>({report.file.name})</span>
+                                            </div>
+                                            <button type="button" onClick={() => handleRemovePastReportFromList(idx)} style={{ background: 'none', border: 'none', color: '#ef4444', fontSize: '18px', cursor: 'pointer', padding: 0 }}>
+                                                🗑️
+                                            </button>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+
+                            {/* File selector input */}
+                            <div className="form-row" style={{ alignItems: 'flex-end', gap: '15px' }}>
+                                <div className="field" style={{ flex: 2 }}>
+                                    <label>Choose Medical Report (Image / PDF)</label>
+                                    <input
+                                        type="file"
+                                        id="past-report-file-picker"
+                                        accept="image/*,application/pdf"
+                                        onChange={e => setNewReportFile(e.target.files[0])}
+                                        style={{ padding: '8px', border: '1.5px dashed #a855f7', borderRadius: '8px', background: '#fdf4ff', width: '100%' }}
+                                    />
+                                </div>
+                                <div className="field" style={{ flex: 2 }}>
+                                    <label>Report Friendly Name</label>
+                                    <input
+                                        type="text"
+                                        placeholder="Ex: Previous MRI, Lab Report etc."
+                                        value={newReportName}
+                                        onChange={e => setNewReportName(e.target.value)}
+                                        style={{ border: '1.5px solid #d8b4fe' }}
+                                    />
+                                </div>
+                                <div className="field" style={{ flex: 1 }}>
+                                    <button
+                                        type="button"
+                                        onClick={handleAddPastReportToList}
+                                        className="btn-save"
+                                        style={{ width: '100%', backgroundColor: '#8b5cf6', color: 'white', border: 'none', padding: '10px', borderRadius: '8px', cursor: 'pointer', fontWeight: 600 }}
+                                    >
+                                        ➕ Add Report
+                                    </button>
+                                </div>
+                            </div>
                         </div>
 
                         <div className="form-footer">
@@ -1280,22 +1723,72 @@ const ReceptionDashboard = () => {
     }
 
     if (viewMode === 'transactions') {
-        const totalCollected = transactions.reduce((sum, t) => sum + (t.amount || 0), 0);
+        const todayStart = new Date();
+        todayStart.setHours(0, 0, 0, 0);
+
+        const todayTransactions = transactions.filter(t => new Date(t.createdAt) >= todayStart);
+        const todayPaid = todayTransactions.filter(t => (t.paymentStatus || '').toLowerCase() === 'paid');
+        const todayTotal = todayPaid.reduce((sum, t) => sum + (t.amount || 0), 0);
+        const todayCash = todayPaid.filter(t => (t.paymentMethod || 'Cash').toLowerCase() === 'cash').reduce((sum, t) => sum + (t.amount || 0), 0);
+        const todayUPI = todayPaid.filter(t => ['upi', 'upi / qr', 'qr'].includes((t.paymentMethod || '').toLowerCase())).reduce((sum, t) => sum + (t.amount || 0), 0);
+        const todayCard = todayPaid.filter(t => (t.paymentMethod || '').toLowerCase() === 'card').reduce((sum, t) => sum + (t.amount || 0), 0);
+        const todayPending = todayTransactions.filter(t => (t.paymentStatus || '').toLowerCase() !== 'paid').length;
+
+        const totalCollected = transactions.filter(t => (t.paymentStatus || '').toLowerCase() === 'paid').reduce((sum, t) => sum + (t.amount || 0), 0);
+
         return (
-            <div className="reception-dashboard" style={{ maxWidth: '1000px', margin: '0 auto' }}>
+            <div className="reception-dashboard" style={{ maxWidth: '1100px', margin: '0 auto' }}>
                 <div className="dashboard-header">
                     <button onClick={() => setViewMode('dashboard')} style={{ padding: '8px 20px', background: '#f1f5f9', border: '2px solid #e2e8f0', borderRadius: '8px', cursor: 'pointer', fontWeight: '600' }}>← Back to Dashboard</button>
-                    <h2>Transaction History</h2>
+                    <h2>💰 My Daily Collection Summary</h2>
                 </div>
 
-                <div className="card" style={{ padding: '20px', marginBottom: '20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: '#e0f2fe', border: '1px solid #bae6fd' }}>
-                    <div>
-                        <h3 style={{ margin: 0, color: '#0369a1' }}>Total Collected</h3>
-                        <p style={{ margin: '5px 0 0', fontSize: '1.5rem', fontWeight: 'bold', color: '#0284c7' }}>₹{totalCollected.toLocaleString('en-IN')}</p>
+                {/* Today's Collection Stats */}
+                <div style={{ background: 'linear-gradient(135deg, #0ea5e9 0%, #6366f1 100%)', borderRadius: '16px', padding: '24px', marginBottom: '20px', color: '#fff' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+                        <div>
+                            <h3 style={{ margin: 0, fontSize: '1.1rem', fontWeight: 700, opacity: 0.85 }}>Today's Collection</h3>
+                            <div style={{ fontSize: '2.4rem', fontWeight: 900, marginTop: '4px' }}>₹{todayTotal.toLocaleString('en-IN')}</div>
+                            <div style={{ fontSize: '0.85rem', opacity: 0.8, marginTop: '4px' }}>{todayPaid.length} paid transaction(s) today</div>
+                        </div>
+                        <div style={{ textAlign: 'right', opacity: 0.85 }}>
+                            <div style={{ fontSize: '0.8rem', fontWeight: 600, marginBottom: '4px' }}>⏳ Pending Today</div>
+                            <div style={{ fontSize: '1.6rem', fontWeight: 800, color: '#fde68a' }}>{todayPending}</div>
+                        </div>
+                    </div>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '12px' }}>
+                        {[
+                            { label: '💵 Cash', amount: todayCash, color: '#d1fae5', textColor: '#065f46' },
+                            { label: '📱 UPI / QR', amount: todayUPI, color: '#ede9fe', textColor: '#4c1d95' },
+                            { label: '💳 Card', amount: todayCard, color: '#fef3c7', textColor: '#92400e' },
+                        ].map(({ label, amount, color, textColor }) => (
+                            <div key={label} style={{ background: 'rgba(255,255,255,0.18)', borderRadius: '12px', padding: '14px 16px', backdropFilter: 'blur(4px)' }}>
+                                <div style={{ fontSize: '0.78rem', fontWeight: 700, opacity: 0.9 }}>{label}</div>
+                                <div style={{ fontSize: '1.25rem', fontWeight: 900, marginTop: '4px' }}>₹{amount.toLocaleString('en-IN')}</div>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+
+                {/* All-time summary */}
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', marginBottom: '20px' }}>
+                    <div style={{ background: '#fff', borderRadius: '12px', padding: '18px 22px', border: '1px solid #e2e8f0', boxShadow: '0 2px 8px rgba(0,0,0,0.05)' }}>
+                        <div style={{ fontSize: '0.8rem', color: '#64748b', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Total All-Time Collected</div>
+                        <div style={{ fontSize: '1.8rem', fontWeight: 900, color: '#0ea5e9', marginTop: '6px' }}>₹{totalCollected.toLocaleString('en-IN')}</div>
+                        <div style={{ fontSize: '0.8rem', color: '#94a3b8', marginTop: '4px' }}>{transactions.filter(t => (t.paymentStatus || '').toLowerCase() === 'paid').length} total paid transactions</div>
+                    </div>
+                    <div style={{ background: '#fff', borderRadius: '12px', padding: '18px 22px', border: '1px solid #e2e8f0', boxShadow: '0 2px 8px rgba(0,0,0,0.05)' }}>
+                        <div style={{ fontSize: '0.8rem', color: '#64748b', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Pending Payments</div>
+                        <div style={{ fontSize: '1.8rem', fontWeight: 900, color: '#f59e0b', marginTop: '6px' }}>{transactions.filter(t => (t.paymentStatus || '').toLowerCase() !== 'paid').length}</div>
+                        <div style={{ fontSize: '0.8rem', color: '#94a3b8', marginTop: '4px' }}>appointments awaiting payment</div>
                     </div>
                 </div>
 
                 <div className="card" style={{ padding: '20px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+                        <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 800, color: '#1e293b' }}>All Transaction History</h3>
+                        <span style={{ fontSize: '0.8rem', color: '#64748b', background: '#f1f5f9', padding: '4px 10px', borderRadius: '20px' }}>{transactions.length} record(s)</span>
+                    </div>
                     <table className="reception-table">
                         <thead>
                             <tr>
@@ -1408,10 +1901,12 @@ const ReceptionDashboard = () => {
                     <div style={{ display: 'flex', background: '#f1f5f9', padding: '3px', borderRadius: '8px', gap: '2px' }}>
                         {[{ id: 'active', label: '🟢 Active' }, { id: 'all', label: '📋 All' }].map(t => (
                             <button key={t.id} onClick={() => setAdmissionStatusTab(t.id)}
-                                style={{ padding: '7px 16px', borderRadius: '6px', border: 'none', fontWeight: 600, fontSize: '0.82rem', cursor: 'pointer',
+                                style={{
+                                    padding: '7px 16px', borderRadius: '6px', border: 'none', fontWeight: 600, fontSize: '0.82rem', cursor: 'pointer',
                                     background: admissionStatusTab === t.id ? '#fff' : 'transparent',
                                     color: admissionStatusTab === t.id ? '#0d9488' : '#64748b',
-                                    boxShadow: admissionStatusTab === t.id ? '0 1px 4px rgba(0,0,0,0.1)' : 'none' }}>
+                                    boxShadow: admissionStatusTab === t.id ? '0 1px 4px rgba(0,0,0,0.1)' : 'none'
+                                }}>
                                 {t.label}
                             </button>
                         ))}
@@ -1527,8 +2022,10 @@ const ReceptionDashboard = () => {
                                                     <div style={{ fontSize: '0.9rem', fontWeight: 800, color: '#134e4a', marginTop: '2px' }}>{adm.ward || <span style={{ color: '#94a3b8' }}>—</span>}</div>
                                                 </div>
                                                 <div style={{ background: '#eff6ff', borderRadius: '10px', padding: '10px 8px', textAlign: 'center', border: '1px solid #bfdbfe' }}>
-                                                    <div style={{ fontSize: '1.1rem' }}>🛏️</div>
-                                                    <div style={{ fontSize: '0.65rem', color: '#1d4ed8', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em' }}>Bed No.</div>
+                                                    <div style={{ fontSize: '1.1rem' }}>{(adm.privateRoom || adm.ward === 'Private Room') ? '🏨' : '🛏️'}</div>
+                                                    <div style={{ fontSize: '0.65rem', color: '#1d4ed8', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                                                        {(adm.privateRoom || adm.ward === 'Private Room') ? 'Pvt Room' : 'Bed No.'}
+                                                    </div>
                                                     <div style={{ fontSize: '0.9rem', fontWeight: 800, color: '#1e3a8a', marginTop: '2px' }}>{adm.bedNumber || <span style={{ color: '#94a3b8' }}>—</span>}</div>
                                                 </div>
                                                 <div style={{ background: daysAdmitted > 7 ? '#fff1f2' : '#fef3c7', borderRadius: '10px', padding: '10px 8px', textAlign: 'center', border: `1px solid ${daysAdmitted > 7 ? '#fda4af' : '#fde68a'}` }}>
@@ -1553,9 +2050,15 @@ const ReceptionDashboard = () => {
                                                 <span style={{ fontSize: '0.8rem', color: '#64748b' }}>
                                                     📅 <strong>{admDate.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}</strong>
                                                 </span>
-                                                <span style={{ fontSize: '0.82rem', color: isPaid ? '#166534' : '#92400e', fontWeight: 700 }}>
-                                                    💰 ₹{Number(adm.totalAmount || 0).toLocaleString('en-IN')} {isPaid ? '✓' : '(Due)'}
-                                                </span>
+                                                {Number(adm.totalAmount) > 0 ? (
+                                                    <span style={{ fontSize: '0.82rem', color: isPaid ? '#166534' : '#92400e', fontWeight: 700 }}>
+                                                        💰 ₹{Number(adm.totalAmount).toLocaleString('en-IN')} {isPaid ? '✓' : '(Due)'}
+                                                    </span>
+                                                ) : (
+                                                    <span style={{ fontSize: '0.82rem', color: '#1e293b', fontWeight: 700 }}>
+                                                        💰 ₹{Number((hospitalContext?.facilities?.find(f => f.name.toLowerCase() === (adm.ward || '').toLowerCase())?.pricePerDay || adm.dailyWardCharge || 0) * Math.max(1, Math.floor((new Date() - new Date(adm.admissionDate)) / (1000 * 60 * 60 * 24)))).toLocaleString('en-IN')} {isPaid ? '✓' : '(Due)'}
+                                                    </span>
+                                                )}
                                             </div>
 
                                             {/* Facility Charges */}
@@ -1581,8 +2084,15 @@ const ReceptionDashboard = () => {
                                             {/* Action Buttons */}
                                             <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', marginTop: '4px' }}>
                                                 {/* Print Slip */}
-                                                <button onClick={() => generateAdmissionSlipPDF(adm)}
-                                                    style={{ flex: 1, minWidth: '80px', padding: '9px 4px', fontSize: '0.72rem', background: '#f0fdfa', color: '#0f766e', border: '1.5px solid #99f6e4', borderRadius: '8px', cursor: 'pointer', fontWeight: 700 }}>
+                                                <button 
+                                                    onClick={() => {
+                                                        if (!isPaid) {
+                                                            alert("Please collect payment before printing the admission slip.");
+                                                            return;
+                                                        }
+                                                        generateAdmissionSlipPDF(adm);
+                                                    }}
+                                                    style={{ flex: 1, minWidth: '80px', padding: '9px 4px', fontSize: '0.72rem', background: isPaid ? '#f0fdfa' : '#f1f5f9', color: isPaid ? '#0f766e' : '#94a3b8', border: `1.5px solid ${isPaid ? '#99f6e4' : '#e2e8f0'}`, borderRadius: '8px', cursor: isPaid ? 'pointer' : 'not-allowed', fontWeight: 700 }}>
                                                     🖨️ Slip
                                                 </button>
                                                 {/* Edit Ward/Bed — only for active or pending */}
@@ -1591,7 +2101,7 @@ const ReceptionDashboard = () => {
                                                         const rawDate = adm.admissionDate
                                                             ? new Date(adm.admissionDate).toISOString().split('T')[0]
                                                             : new Date().toISOString().split('T')[0];
-                                                        setEditAdmissionForm({ ward: adm.ward || '', bedNumber: adm.bedNumber || '', notes: adm.notes || '', admissionDate: rawDate });
+                                                        setEditAdmissionForm({ ward: adm.ward || '', bedNumber: adm.bedNumber || '', privateRoom: adm.privateRoom || adm.ward === 'Private Room', notes: adm.notes || '', admissionDate: rawDate, dailyWardCharge: adm.dailyWardCharge || '' });
                                                         setEditAdmissionModal({ open: true, admission: adm });
                                                     }}
                                                         style={{ flex: 1, minWidth: '80px', padding: '9px 4px', fontSize: '0.72rem', background: '#eff6ff', color: '#1d4ed8', border: '1.5px solid #bfdbfe', borderRadius: '8px', cursor: 'pointer', fontWeight: 700 }}>
@@ -1608,22 +2118,17 @@ const ReceptionDashboard = () => {
                                                 {/* Discharge — active patients */}
                                                 {isActive && (
                                                     <button onClick={() => {
-                                                        if (!isPaid) {
-                                                            // Open payment collection first
-                                                            setCollectPaymentModal({ open: true, admission: adm, method: 'Cash' });
-                                                        } else {
-                                                            setDischargeForm({ dischargeDate: new Date().toISOString().split('T')[0], notes: '' });
-                                                            setDischargeModal({ open: true, admission: adm });
-                                                        }
+                                                        setDischargeForm({ dischargeDate: new Date().toISOString().split('T')[0], notes: '', overrideDues: false });
+                                                        setDischargeModal({ open: true, admission: adm });
                                                     }}
                                                         style={{
                                                             flex: 1, minWidth: '80px', padding: '9px 4px', fontSize: '0.72rem',
-                                                            background: isPaid ? '#fff1f2' : '#f1f5f9',
-                                                            color: isPaid ? '#be123c' : '#94a3b8',
-                                                            border: `1.5px solid ${isPaid ? '#fda4af' : '#e2e8f0'}`,
+                                                            background: '#fff1f2',
+                                                            color: '#be123c',
+                                                            border: '1.5px solid #fda4af',
                                                             borderRadius: '8px', cursor: 'pointer', fontWeight: 700
                                                         }}>
-                                                        🚪 {isPaid ? 'Discharge' : 'Pay & Exit'}
+                                                        🚪 Discharge
                                                     </button>
                                                 )}
                                             </div>
@@ -1654,31 +2159,70 @@ const ReceptionDashboard = () => {
                                     style={{ background: 'none', border: 'none', fontSize: '1.4rem', cursor: 'pointer', color: '#94a3b8' }}>✕</button>
                             </div>
 
-                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px', marginBottom: '14px' }}>
+                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px', marginBottom: '12px' }}>
                                 <div>
                                     <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, color: '#374151', marginBottom: '5px' }}>🏥 Ward / Room</label>
-                                    <input type="text" placeholder="e.g. General Ward, ICU"
+                                    <select
                                         value={editAdmissionForm.ward}
-                                        onChange={e => setEditAdmissionForm(p => ({ ...p, ward: e.target.value }))}
-                                        style={{ width: '100%', padding: '10px 12px', border: '1.5px solid #e2e8f0', borderRadius: '8px', fontSize: '0.9rem', boxSizing: 'border-box' }}
-                                    />
+                                        onChange={e => {
+                                            const w = e.target.value;
+                                            const facMatch = hospitalContext?.facilities?.find(f => f.name.toLowerCase() === w.toLowerCase());
+                                            const defaultPrice = facMatch ? facMatch.pricePerDay : 0;
+                                            setEditAdmissionForm(p => ({ ...p, ward: w, bedNumber: '', privateRoom: w === 'Private Room', dailyWardCharge: defaultPrice }));
+                                        }}
+                                        style={{ width: '100%', padding: '10px 12px', border: '1.5px solid #e2e8f0', borderRadius: '8px', fontSize: '0.9rem', boxSizing: 'border-box', background: '#fff', cursor: 'pointer' }}
+                                    >
+                                        <option value="">— Select Ward —</option>
+                                        {Object.keys(WARD_BED_MAP).map(w => (
+                                            <option key={w} value={w}>{w}</option>
+                                        ))}
+                                    </select>
                                 </div>
                                 <div>
                                     <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, color: '#374151', marginBottom: '5px' }}>🛏️ Bed Number</label>
-                                    <input type="text" placeholder="e.g. B-12, ICU-3"
+                                    <select
                                         value={editAdmissionForm.bedNumber}
                                         onChange={e => setEditAdmissionForm(p => ({ ...p, bedNumber: e.target.value }))}
-                                        style={{ width: '100%', padding: '10px 12px', border: '1.5px solid #e2e8f0', borderRadius: '8px', fontSize: '0.9rem', boxSizing: 'border-box' }}
-                                    />
+                                        disabled={!editAdmissionForm.ward}
+                                        style={{ width: '100%', padding: '10px 12px', border: '1.5px solid #e2e8f0', borderRadius: '8px', fontSize: '0.9rem', boxSizing: 'border-box', background: editAdmissionForm.ward ? '#fff' : '#f8fafc', cursor: editAdmissionForm.ward ? 'pointer' : 'not-allowed', color: editAdmissionForm.ward ? '#1e293b' : '#94a3b8' }}
+                                    >
+                                        <option value="">{editAdmissionForm.ward ? '— Select Bed —' : '— Select Ward First —'}</option>
+                                        {(WARD_BED_MAP[editAdmissionForm.ward] || []).map(b => (
+                                            <option key={b} value={b}>{b}</option>
+                                        ))}
+                                    </select>
                                 </div>
                             </div>
 
-                            {/* Admission Date + Live Days Counter */}
+                            {/* Private Room Checkbox */}
+                            <div style={{ marginBottom: '14px', padding: '12px 16px', background: editAdmissionForm.privateRoom ? 'linear-gradient(135deg, #eff6ff, #f0fdf4)' : '#f8fafc', borderRadius: '10px', border: `1.5px solid ${editAdmissionForm.privateRoom ? '#3b82f6' : '#e2e8f0'}`, transition: 'all 0.2s ease' }}>
+                                <label style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer', userSelect: 'none' }}>
+                                    <input
+                                        type="checkbox"
+                                        checked={editAdmissionForm.privateRoom}
+                                        onChange={e => setEditAdmissionForm(p => ({
+                                            ...p,
+                                            privateRoom: e.target.checked,
+                                            ward: e.target.checked ? 'Private Room' : (p.ward === 'Private Room' ? '' : p.ward),
+                                            bedNumber: e.target.checked ? '' : (p.ward === 'Private Room' ? '' : p.bedNumber)
+                                        }))}
+                                        style={{ width: '18px', height: '18px', accentColor: '#3b82f6', cursor: 'pointer', flexShrink: 0 }}
+                                    />
+                                    <div>
+                                        <div style={{ fontWeight: 700, fontSize: '0.9rem', color: editAdmissionForm.privateRoom ? '#1d4ed8' : '#374151' }}>🏨 Private / Personal Room</div>
+                                        <div style={{ fontSize: '0.78rem', color: '#64748b', marginTop: '2px' }}>Allocate an exclusive private room for this patient</div>
+                                    </div>
+                                    {editAdmissionForm.privateRoom && (
+                                        <span style={{ marginLeft: 'auto', padding: '3px 10px', background: '#dbeafe', color: '#1d4ed8', borderRadius: '20px', fontSize: '0.75rem', fontWeight: 700, whiteSpace: 'nowrap' }}>✓ Selected</span>
+                                    )}
+                                </label>
+                            </div>
+
                             <div style={{ marginBottom: '14px' }}>
-                                <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, color: '#374151', marginBottom: '5px' }}>📅 Admission Date <span style={{ fontWeight: 400, color: '#94a3b8', fontSize: '0.78rem' }}>(changes the Days In count)</span></label>
-                                <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
-                                    <input type="date"
-                                        value={editAdmissionForm.admissionDate}
+                                    <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, color: '#374151', marginBottom: '5px' }}>📅 Admission Date</label>
+                                    <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+                                        <input type="date"
+                                            value={editAdmissionForm.admissionDate}
                                         max={new Date().toISOString().split('T')[0]}
                                         onChange={e => setEditAdmissionForm(p => ({ ...p, admissionDate: e.target.value }))}
                                         style={{ flex: 1, padding: '10px 12px', border: '1.5px solid #e2e8f0', borderRadius: '8px', fontSize: '0.9rem', boxSizing: 'border-box' }}
@@ -1815,7 +2359,7 @@ const ReceptionDashboard = () => {
                                         ['Patient', dischargeModal.admission?.patientId?.name || [dischargeModal.admission?.patientId?.firstName, dischargeModal.admission?.patientId?.lastName].filter(Boolean).join(' ') || '—'],
                                         ['Ward / Bed', `${dischargeModal.admission?.ward || '—'} / ${dischargeModal.admission?.bedNumber || '—'}`],
                                         ['Admitted', new Date(dischargeModal.admission?.admissionDate).toLocaleDateString('en-IN')],
-                                        ['Total Bill', `₹${Number(dischargeModal.admission?.totalAmount || 0).toLocaleString('en-IN')}`],
+                                        ['Total Bill', `₹${Number(dischargeModal.admission?.totalAmount > 0 ? dischargeModal.admission.totalAmount : ((hospitalContext?.facilities?.find(f => f.name.toLowerCase() === (dischargeModal.admission?.ward || '').toLowerCase())?.pricePerDay || dischargeModal.admission?.dailyWardCharge || 0) * Math.max(1, Math.floor((new Date() - new Date(dischargeModal.admission?.admissionDate)) / (1000 * 60 * 60 * 24))))).toLocaleString('en-IN')}`],
                                     ].map(([l, v], i) => (
                                         <div key={i} style={{ fontSize: '0.82rem' }}>
                                             <span style={{ color: '#94a3b8', fontWeight: 600 }}>{l}: </span>
@@ -1867,741 +2411,1131 @@ const ReceptionDashboard = () => {
 
     return (
         <>
-        <div className="reception-dashboard">
-            {/* DYNAMIC HEADER */}
-            <div className="dashboard-header" style={{
-                background: 'linear-gradient(135deg, #1e293b, #0f172a)',
-                borderRadius: '16px', padding: '20px 28px',
-                marginBottom: '20px', color: '#f8fafc',
-                display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                flexWrap: 'wrap', gap: '12px'
-            }}>
-                <div>
-                    <h1 style={{ margin: 0, fontSize: '1.5rem', fontWeight: 800 }}>
-                        {greeting()}, {currentUser?.name || 'Reception'} 👋
-                    </h1>
-                    <p style={{ margin: '4px 0 0', color: '#94a3b8', fontSize: '0.85rem' }}>
-                        {new Date().toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })} 
-                        • {hospitalContext?.name || 'Hospital'} 
-                        {hospitalContext?.appointmentMode === 'token' && ' 🎟️ Token Mode'}
-                        <span style={{ marginLeft: '8px', opacity: 0.6, fontSize: '0.75rem' }}>Auto-refreshes every 30s</span>
-                    </p>
-                </div>
-                <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
-                    <button className="btn-cancel" onClick={() => { fetchTransactions(); setViewMode('transactions'); }} 
-                        style={{ padding: '10px 20px', fontSize: '0.9rem', background: 'rgba(255,255,255,0.08)', color: '#e2e8f0', border: '1px solid rgba(255,255,255,0.15)', borderRadius: '10px', cursor: 'pointer', fontWeight: 600 }}>
-                        💰 Transactions
-                    </button>
-                    <button className="btn-cancel" onClick={() => {
-                        if (profilePatient) {
-                            navigate(`/billing/patient?search=${encodeURIComponent(profilePatient.patientId || profilePatient.name)}`);
-                        } else if (searchQuery) {
-                            navigate(`/billing/patient?search=${encodeURIComponent(searchQuery)}`);
-                        } else {
-                            navigate('/billing/patient');
-                        }
-                    }} 
-                        style={{ padding: '10px 20px', fontSize: '0.9rem', background: 'rgba(16,185,129,0.15)', color: '#6ee7b7', border: '1px solid rgba(16,185,129,0.3)', borderRadius: '10px', cursor: 'pointer', fontWeight: 600 }}>
-                        🧾 Billing
-                    </button>
-                    <button onClick={() => { fetchAdmissions(); setViewMode('admitted'); }}
-                        style={{
-                            position: 'relative',
-                            padding: '10px 20px',
-                            fontSize: '0.9rem',
-                            background: 'rgba(251,191,36,0.15)',
-                            color: '#fbbf24',
-                            border: '1px solid rgba(251,191,36,0.3)',
-                            borderRadius: '10px',
-                            cursor: 'pointer',
-                            fontWeight: 600,
-                            display: 'inline-flex',
-                            alignItems: 'center',
-                            gap: '8px'
+            <div className="reception-dashboard">
+                {/* DYNAMIC HEADER */}
+                <div className="dashboard-header" style={{
+                    background: 'linear-gradient(135deg, #1e293b, #0f172a)',
+                    borderRadius: '16px', padding: '20px 28px',
+                    marginBottom: '20px', color: '#f8fafc',
+                    display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                    flexWrap: 'wrap', gap: '12px'
+                }}>
+                    <div>
+                        <h1 style={{ margin: 0, fontSize: '1.5rem', fontWeight: 800 }}>
+                            {greeting()}, {currentUser?.name || 'Reception'} 👋
+                        </h1>
+                        <p style={{ margin: '4px 0 0', color: '#94a3b8', fontSize: '0.85rem' }}>
+                            {new Date().toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}
+                            • {hospitalContext?.name || 'Hospital'}
+                            {hospitalContext?.appointmentMode === 'token' && ' 🎟️ Token Mode'}
+                            <span style={{ marginLeft: '8px', opacity: 0.6, fontSize: '0.75rem' }}>Auto-refreshes every 30s</span>
+                        </p>
+                    </div>
+                    <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+                        <button className="btn-cancel" onClick={() => setViewMode('transactions')}
+                            style={{ padding: '10px 20px', fontSize: '0.9rem', background: 'rgba(255,255,255,0.08)', color: '#e2e8f0', border: '1px solid rgba(255,255,255,0.15)', borderRadius: '10px', cursor: 'pointer', fontWeight: 600 }}>
+                            💰 My Collection
+                        </button>
+                        <button className="btn-cancel" onClick={() => {
+                            if (profilePatient) {
+                                navigate(`/billing/patient?search=${encodeURIComponent(profilePatient.patientId || profilePatient.name)}`);
+                            } else if (searchQuery) {
+                                navigate(`/billing/patient?search=${encodeURIComponent(searchQuery)}`);
+                            } else {
+                                navigate('/billing/patient');
+                            }
                         }}
-                    >
-                        🏥 Admitted Patients
-                        {pendingAllocationCount > 0 && (
-                            <span style={{
-                                background: '#ef4444',
-                                color: '#fff',
+                            style={{ padding: '10px 20px', fontSize: '0.9rem', background: 'rgba(16,185,129,0.15)', color: '#6ee7b7', border: '1px solid rgba(16,185,129,0.3)', borderRadius: '10px', cursor: 'pointer', fontWeight: 600 }}>
+                            🧾 Billing
+                        </button>
+                        <button onClick={() => { fetchAdmissions(); setViewMode('admitted'); }}
+                            style={{
+                                position: 'relative',
+                                padding: '10px 20px',
+                                fontSize: '0.9rem',
+                                background: 'rgba(251,191,36,0.15)',
+                                color: '#fbbf24',
+                                border: '1px solid rgba(251,191,36,0.3)',
                                 borderRadius: '10px',
-                                padding: '2px 8px',
-                                fontSize: '0.75rem',
-                                fontWeight: 800,
+                                cursor: 'pointer',
+                                fontWeight: 600,
                                 display: 'inline-flex',
                                 alignItems: 'center',
-                                justifyContent: 'center'
-                            }}>
-                                {pendingAllocationCount}
-                            </span>
-                        )}
-                    </button>
-                    <button onClick={handleNewWalkIn} 
-                        style={{ padding: '10px 24px', fontSize: '0.9rem', background: 'linear-gradient(135deg, #06b6d4, #0d9488)', color: '#fff', border: 'none', borderRadius: '10px', cursor: 'pointer', fontWeight: 700, boxShadow: '0 4px 16px rgba(13,148,136,0.3)' }}>
-                        + New Registration
-                    </button>
-                </div>
-            </div>
-
-            {/* DYNAMIC STATS BANNER */}
-            <div style={{
-                display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))',
-                gap: '12px', marginBottom: '20px'
-            }}>
-                {[
-                    { label: 'Total Today', value: totalToday, icon: '📋', color: '#3b82f6', bg: '#eff6ff' },
-                    { label: 'Pending', value: pendingToday, icon: '⏳', color: '#d97706', bg: '#fffbeb' },
-                    { label: 'Confirmed', value: confirmedToday, icon: '✅', color: '#059669', bg: '#f0fdf4' },
-                    { label: 'Completed', value: completedToday, icon: '✔️', color: '#1d4ed8', bg: '#eff6ff' },
-                    { label: 'Cancelled', value: cancelledToday, icon: '❌', color: '#dc2626', bg: '#fef2f2' },
-                    { label: 'Revenue', value: `₹${revenueToday.toLocaleString('en-IN')}`, icon: '💰', color: '#7c3aed', bg: '#f5f3ff' },
-                    { label: 'Unique Patients', value: totalUniquePatients, icon: '👥', color: '#0891b2', bg: '#ecfeff' },
-                ].map((s, i) => (
-                    <div key={i} style={{
-                        background: s.bg, borderRadius: '12px', padding: '16px',
-                        border: `1px solid ${s.color}20`, textAlign: 'center'
-                    }}>
-                        <div style={{ fontSize: '1.5rem', marginBottom: '4px' }}>{s.icon}</div>
-                        <div style={{ fontSize: '1.4rem', fontWeight: 800, color: s.color }}>{s.value}</div>
-                        <div style={{ fontSize: '0.7rem', color: '#64748b', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em' }}>{s.label}</div>
+                                gap: '8px'
+                            }}
+                        >
+                            🏥 Admitted Patients
+                            {pendingAllocationCount > 0 && (
+                                <span style={{
+                                    background: '#ef4444',
+                                    color: '#fff',
+                                    borderRadius: '10px',
+                                    padding: '2px 8px',
+                                    fontSize: '0.75rem',
+                                    fontWeight: 800,
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center'
+                                }}>
+                                    {pendingAllocationCount}
+                                </span>
+                            )}
+                        </button>
+                        <button onClick={handleNewWalkIn}
+                            style={{ padding: '10px 24px', fontSize: '0.9rem', background: 'linear-gradient(135deg, #06b6d4, #0d9488)', color: '#fff', border: 'none', borderRadius: '10px', cursor: 'pointer', fontWeight: 700, boxShadow: '0 4px 16px rgba(13,148,136,0.3)' }}>
+                            + New Registration
+                        </button>
                     </div>
-                ))}
-            </div>
-
-            {/* SEARCH + QUICK BOOK ROW */}
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', marginBottom: '20px' }}>
-                {/* SEARCH SECTION */}
-                <div className="search-section card" style={{ padding: '16px', position: 'relative', background: '#fff', borderRadius: '12px', border: '1px solid #e2e8f0' }}>
-                    <h4 style={{ margin: '0 0 8px', fontSize: '0.82rem', color: '#64748b', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em' }}>🔍 Find Patient</h4>
-                    <div style={{ display: 'flex', gap: '8px' }}>
-                        <input
-                            type="text"
-                            placeholder="Search by Name, Mobile or MRN..."
-                            value={searchQuery}
-                            onChange={handleSearch}
-                            style={{ flex: 1, padding: '10px 14px', fontSize: '0.9rem', borderRadius: '8px', border: '1.5px solid #e2e8f0', outline: 'none' }}
-                        />
-                    </div>
-                    {searchResults.length > 0 && (
-                        <div className="search-results-dropdown" style={{
-                            position: 'absolute', top: '76px', left: '16px', right: '16px',
-                            background: 'white', border: '1px solid #e2e8f0', boxShadow: '0 8px 24px rgba(0,0,0,0.12)',
-                            zIndex: 1000, maxHeight: '280px', overflowY: 'auto', borderRadius: '10px'
-                        }}>
-                            {searchResults.map(p => (
-                                <div key={p._id} style={{ padding: '12px 14px', borderBottom: '1px solid #f1f5f9', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                    <div>
-                                        <div style={{ fontWeight: 600, fontSize: '0.95rem', color: '#1e293b' }}>{p.name} <span style={{ color: '#94a3b8', fontSize: '0.8rem' }}>({p.patientId || 'N/A'})</span></div>
-                                        <div style={{ fontSize: '0.82rem', color: '#94a3b8' }}>📱 {p.phone}</div>
-                                    </div>
-                                    <div style={{ display: 'flex', gap: '6px' }}>
-                                        <button onClick={() => handleViewProfile(p)}
-                                            style={{ padding: '5px 12px', fontSize: '0.8rem', background: '#f0f4ff', color: '#3b82f6', border: '1.5px solid #3b82f6', borderRadius: '6px', cursor: 'pointer', fontWeight: 600 }}>
-                                            View
-                                        </button>
-                                        <button onClick={() => handleEditPatient(p)}
-                                            style={{ padding: '5px 12px', fontSize: '0.8rem', background: '#0d9488', color: '#fff', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 600 }}>
-                                            Book
-                                        </button>
-                                        <button onClick={() => navigate(`/billing/patient?search=${encodeURIComponent(p.patientId || p.name)}`)}
-                                            style={{ padding: '5px 12px', fontSize: '0.8rem', background: 'rgba(16,185,129,0.15)', color: '#10b981', border: '1px solid #10b981', borderRadius: '6px', cursor: 'pointer', fontWeight: 600 }}>
-                                            🧾 Billing
-                                        </button>
-                                    </div>
-                                </div>
-                            ))}
-                        </div>
-                    )}
                 </div>
 
-                {/* AVAILABILITY WIDGET */}
-                <div className="availability-widget card" style={{ padding: '16px', background: '#fff', borderRadius: '12px', border: '1px solid #e2e8f0' }}>
-                    <h4 style={{ margin: '0 0 8px', fontSize: '0.82rem', color: '#64748b', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em' }}>📅 Quick Availability</h4>
-                    <div className="widget-controls" style={{ display: 'flex', gap: '8px', marginBottom: '10px' }}>
-                        <select className="avail-select" onChange={(e) => setAvailabilityCheck({ ...availabilityCheck, doctorId: e.target.value })}
-                            style={{ flex: 1, padding: '10px', borderRadius: '8px', border: '1.5px solid #e2e8f0', fontSize: '0.85rem' }}>
-                            <option value="">Select Doctor</option>
-                            {doctorsList.map(d => <option key={d._id} value={d._id}>{d.name}</option>)}
-                        </select>
-                        <input type="date" value={availabilityCheck.date} onChange={(e) => setAvailabilityCheck({ ...availabilityCheck, date: e.target.value })}
-                            style={{ padding: '10px', borderRadius: '8px', border: '1.5px solid #e2e8f0', fontSize: '0.85rem' }} />
-                    </div>
-                    {availabilityCheck.doctorId && (
-                        <div className="slot-grid" style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
-                            {timeSlots.map(t => {
-                                const isBooked = availabilityCheck.bookedSlots.includes(t);
-                                const isPast = intakeForm.visitDate === todayStr && (() => {
-                                    const [h, m] = t.split(':').map(Number);
-                                    const now = new Date();
-                                    return new Date(now.getFullYear(), now.getMonth(), now.getDate(), h, m) <= now;
-                                })();
-                                return (
-                                    <button key={t} type="button"
-                                        className={`slot-btn ${isBooked ? 'booked' : ''}`}
-                                        onClick={() => !isBooked && !isPast && handleSlotClick(t)}
-                                        disabled={isBooked || isPast}
-                                        style={{
-                                            padding: '6px 10px', fontSize: '0.78rem', borderRadius: '6px', border: '1px solid #e2e8f0',
-                                            background: isBooked ? '#fee2e2' : isPast ? '#f1f5f9' : '#fff',
-                                            color: isBooked ? '#dc2626' : isPast ? '#94a3b8' : '#1e293b',
-                                            cursor: isBooked || isPast ? 'not-allowed' : 'pointer', fontWeight: 600,
-                                            opacity: isBooked || isPast ? 0.6 : 1
-                                        }}>
-                                        {t}
-                                    </button>
-                                );
-                            })}
-                        </div>
-                    )}
-                </div>
-            </div>
-
-            {/* TODAY'S QUEUE WITH STATUS FILTER */}
-            <div className="appointments-list" style={{ background: '#fff', borderRadius: '12px', border: '1px solid #e2e8f0', overflow: 'hidden' }}>
+                {/* DYNAMIC STATS BANNER */}
                 <div style={{
-                    display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                    padding: '16px 20px', borderBottom: '1px solid #e2e8f0', flexWrap: 'wrap', gap: '10px'
+                    display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))',
+                    gap: '12px', marginBottom: '20px'
                 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
-                        <h3 style={{ margin: 0, fontSize: '1.05rem', color: '#1e293b', fontWeight: 700 }}>
-                            {dateTab === 'today' ? "Today's Queue" : dateTab === 'tomorrow' ? "Tomorrow's Schedule" : dateTab === 'future' ? "Future Schedule" : "Patient Queue"}
-                        </h3>
-                        
-                        {/* Date Range Tabs Selector */}
-                        <div style={{ display: 'flex', background: '#f1f5f9', padding: '3px', borderRadius: '8px', gap: '2px' }}>
-                            {[
-                                { id: 'today', label: 'Today' },
-                                { id: 'tomorrow', label: 'Tomorrow' },
-                                { id: 'future', label: 'Future' }
-                            ].map(t => (
+                    {[
+                        { label: 'Total Today', value: totalToday, icon: '📋', color: '#3b82f6', bg: '#eff6ff' },
+                        { label: 'Pending', value: pendingToday, icon: '⏳', color: '#d97706', bg: '#fffbeb' },
+                        { label: 'Confirmed', value: confirmedToday, icon: '✅', color: '#059669', bg: '#f0fdf4' },
+                        { label: 'Completed', value: completedToday, icon: '✔️', color: '#1d4ed8', bg: '#eff6ff' },
+                        { label: 'Cancelled', value: cancelledToday, icon: '❌', color: '#dc2626', bg: '#fef2f2' },
+                        { label: 'Revenue', value: `₹${revenueToday.toLocaleString('en-IN')}`, icon: '💰', color: '#7c3aed', bg: '#f5f3ff' },
+                        { label: 'Unique Patients', value: totalUniquePatients, icon: '👥', color: '#0891b2', bg: '#ecfeff' },
+                    ].map((s, i) => (
+                        <div key={i} style={{
+                            background: s.bg, borderRadius: '12px', padding: '16px',
+                            border: `1px solid ${s.color}20`, textAlign: 'center'
+                        }}>
+                            <div style={{ fontSize: '1.5rem', marginBottom: '4px' }}>{s.icon}</div>
+                            <div style={{ fontSize: '1.4rem', fontWeight: 800, color: s.color }}>{s.value}</div>
+                            <div style={{ fontSize: '0.7rem', color: '#64748b', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em' }}>{s.label}</div>
+                        </div>
+                    ))}
+                </div>
+
+                {/* NEW REPORTING & OVERVIEW DASHBOARD WIDGETS */}
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px', marginTop: '20px', marginBottom: '20px' }}>
+
+                    {/* LEFT COLUMN: LIVE WARD OCCUPANCY & APPOINTMENT LOAD */}
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+
+                        {/* WARD OCCUPANCY CARD */}
+                        {(() => {
+                            const occupiedBeds = admissions.filter(a => a.status === 'Admitted').length;
+                            const pendingBeds = admissions.filter(a => a.status === 'Pending Allocation').length;
+                            const totalBeds = 50; // Standard hospital capacity limit
+                            const availableBeds = Math.max(0, totalBeds - occupiedBeds);
+                            const occupancyRate = Math.round((occupiedBeds / totalBeds) * 100);
+
+                            return (
+                                <div style={{
+                                    background: '#fff', borderRadius: '16px', padding: '24px',
+                                    border: '1px solid #e2e8f0', boxShadow: '0 4px 6px -1px rgba(0,0,0,0.05)'
+                                }}>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+                                        <h3 style={{ margin: 0, fontSize: '1.1rem', fontWeight: 800, color: '#1e293b', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                            🏥 Live Ward Occupancy
+                                        </h3>
+                                        <span style={{
+                                            background: '#f0fdf4', color: '#166534', padding: '4px 10px',
+                                            borderRadius: '20px', fontSize: '0.75rem', fontWeight: 700
+                                        }}>
+                                            Active
+                                        </span>
+                                    </div>
+
+                                    {/* Progress Visual */}
+                                    <div style={{ marginBottom: '20px' }}>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.85rem', color: '#64748b', marginBottom: '6px' }}>
+                                            <span>Capacity Occupancy</span>
+                                            <span style={{ fontWeight: 700, color: '#0d9488' }}>{occupancyRate}% ({occupiedBeds}/{totalBeds})</span>
+                                        </div>
+                                        <div style={{ width: '100%', height: '10px', background: '#f1f5f9', borderRadius: '6px', overflow: 'hidden' }}>
+                                            <div style={{ width: `${occupancyRate}%`, height: '100%', background: 'linear-gradient(90deg, #0d9488, #14b8a6)', borderRadius: '6px' }}></div>
+                                        </div>
+                                    </div>
+
+                                    {/* Bed Info Breakdown */}
+                                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '12px', marginBottom: '20px' }}>
+                                        <div style={{ background: '#f0fdfa', borderRadius: '12px', padding: '12px', textAlign: 'center', border: '1px solid #ccfbf1' }}>
+                                            <div style={{ fontSize: '1.2rem', fontWeight: 800, color: '#0f766e' }}>{occupiedBeds}</div>
+                                            <div style={{ fontSize: '0.72rem', color: '#0d9488', fontWeight: 600 }}>Occupied</div>
+                                        </div>
+                                        <div style={{ background: '#fffbeb', borderRadius: '12px', padding: '12px', textAlign: 'center', border: '1px solid #fef3c7' }}>
+                                            <div style={{ fontSize: '1.2rem', fontWeight: 800, color: '#b45309' }}>{pendingBeds}</div>
+                                            <div style={{ fontSize: '0.72rem', color: '#d97706', fontWeight: 600 }}>Pending Alloc.</div>
+                                        </div>
+                                        <div style={{ background: '#eff6ff', borderRadius: '12px', padding: '12px', textAlign: 'center', border: '1px solid #dbeafe' }}>
+                                            <div style={{ fontSize: '1.2rem', fontWeight: 800, color: '#1d4ed8' }}>{availableBeds}</div>
+                                            <div style={{ fontSize: '0.72rem', color: '#1e40af', fontWeight: 600 }}>Available Beds</div>
+                                        </div>
+                                    </div>
+
+                                    <button
+                                        onClick={() => { fetchAdmissions(); setViewMode('admitted'); }}
+                                        style={{
+                                            width: '100%', padding: '12px', background: '#f1f5f9', color: '#475569',
+                                            border: '1px solid #e2e8f0', borderRadius: '10px', cursor: 'pointer',
+                                            fontWeight: 700, fontSize: '0.88rem', display: 'flex', alignItems: 'center',
+                                            justifyContent: 'center', gap: '6px', transition: 'all 0.2s'
+                                        }}
+                                        onMouseEnter={e => { e.currentTarget.style.background = '#e2e8f0'; }}
+                                        onMouseLeave={e => { e.currentTarget.style.background = '#f1f5f9'; }}
+                                    >
+                                        🛌 Manage Ward & Allocations
+                                    </button>
+                                </div>
+                            );
+                        })()}
+
+                        {/* DOCTOR SCHEDULING LOAD WIDGET */}
+                        <div style={{
+                            background: '#fff', borderRadius: '16px', padding: '24px',
+                            border: '1px solid #e2e8f0', boxShadow: '0 4px 6px -1px rgba(0,0,0,0.05)'
+                        }}>
+                            <h3 style={{ margin: '0 0 16px', fontSize: '1.1rem', fontWeight: 800, color: '#1e293b' }}>
+                                👨‍⚕️ Today's Appointment Distribution
+                            </h3>
+
+                            {(() => {
+                                // Count appointments per doctor for today
+                                const docCounts = {};
+                                appointments.forEach(a => {
+                                    const name = a.doctorName || 'General Practice';
+                                    docCounts[name] = (docCounts[name] || 0) + 1;
+                                });
+
+                                const docData = Object.entries(docCounts)
+                                    .map(([name, count]) => ({ name, count }))
+                                    .sort((a, b) => b.count - a.count)
+                                    .slice(0, 4);
+
+                                if (docData.length === 0) {
+                                    return (
+                                        <div style={{ textAlign: 'center', padding: '24px 0', color: '#94a3b8' }}>
+                                            <span style={{ fontSize: '1.8rem' }}>📅</span>
+                                            <p style={{ margin: '6px 0 0', fontSize: '0.85rem' }}>No appointments booked for today yet.</p>
+                                        </div>
+                                    );
+                                }
+
+                                const maxCount = Math.max(...docData.map(d => d.count));
+
+                                return (
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                                        {docData.map((d, index) => {
+                                            const percentage = Math.max(5, Math.round((d.count / maxCount) * 100));
+                                            const colors = ['#3b82f6', '#0d9488', '#8b5cf6', '#f59e0b'];
+                                            const color = colors[index % colors.length];
+
+                                            return (
+                                                <div key={d.name}>
+                                                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.85rem', marginBottom: '4px' }}>
+                                                        <span style={{ fontWeight: 600, color: '#475569' }}>Dr. {d.name}</span>
+                                                        <span style={{ fontWeight: 700, color: '#1e293b' }}>{d.count} patients</span>
+                                                    </div>
+                                                    <div style={{ width: '100%', height: '8px', background: '#f1f5f9', borderRadius: '4px', overflow: 'hidden' }}>
+                                                        <div style={{ width: `${percentage}%`, height: '100%', background: color, borderRadius: '4px' }}></div>
+                                                    </div>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                );
+                            })()}
+                        </div>
+
+                    </div>
+
+                    {/* RIGHT COLUMN: RECENT OPERATIONS & BILLING LOG */}
+                    <div style={{
+                        background: '#fff', borderRadius: '16px', padding: '24px',
+                        border: '1px solid #e2e8f0', boxShadow: '0 4px 6px -1px rgba(0,0,0,0.05)',
+                        display: 'flex', flexDirection: 'column', justifyContent: 'space-between'
+                    }}>
+                        <div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+                                <h3 style={{ margin: 0, fontSize: '1.1rem', fontWeight: 800, color: '#1e293b', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                    💰 Recent Transactions
+                                </h3>
                                 <button
-                                    key={t.id}
-                                    type="button"
-                                    onClick={() => {
-                                        setDateTab(t.id);
-                                        if (t.id === 'today') {
-                                            setSelectedQueueDate(todayStr);
-                                            fetchAppointments(todayStr, false, false);
-                                        } else if (t.id === 'tomorrow') {
-                                            const tom = new Date(); tom.setDate(tom.getDate() + 1);
-                                            const tomStr = getLocalDateString(tom);
-                                            setSelectedQueueDate(tomStr);
-                                            fetchAppointments(tomStr, false, true);
-                                        } else {
-                                            setSelectedQueueDate('');
-                                            fetchAppointments('', true, false);
-                                        }
-                                    }}
+                                    onClick={() => setViewMode('transactions')}
                                     style={{
-                                        padding: '4px 10px',
-                                        borderRadius: '6px',
-                                        border: 'none',
-                                        fontSize: '0.78rem',
-                                        fontWeight: '700',
-                                        cursor: 'pointer',
-                                        background: dateTab === t.id ? '#fff' : 'transparent',
-                                        color: dateTab === t.id ? '#1e293b' : '#64748b',
-                                        boxShadow: dateTab === t.id ? '0 1px 3px rgba(0,0,0,0.1)' : 'none',
-                                        transition: 'all 0.15s'
+                                        background: 'none', border: 'none', color: '#3b82f6', fontSize: '0.82rem',
+                                        fontWeight: 700, cursor: 'pointer', padding: 0
                                     }}
                                 >
-                                    {t.label}
+                                    View All →
                                 </button>
-                            ))}
-                        </div>
+                            </div>
 
-                        {dateTab !== 'future' && (
-                            <input
-                                type="date"
-                                value={selectedQueueDate}
-                                onChange={(e) => {
-                                    const newDate = e.target.value;
-                                    setSelectedQueueDate(newDate);
-                                    const tom = new Date(); tom.setDate(tom.getDate() + 1);
-                                    const tomStr = tom.toISOString().split('T')[0];
-                                    setDateTab(newDate === todayStr ? 'today' : newDate === tomStr ? 'tomorrow' : 'custom');
-                                    fetchAppointments(newDate, false);
-                                }}
-                                style={{
-                                    padding: '5px 10px',
-                                    borderRadius: '8px',
-                                    border: '1.5px solid #e2e8f0',
-                                    fontSize: '0.8rem',
-                                    color: '#475569',
-                                    fontWeight: '600',
-                                    outline: 'none',
-                                    cursor: 'pointer',
-                                    background: '#f8fafc'
-                                }}
-                            />
-                        )}
+                            {/* Today's Collection Summary (mini) */}
+                            {(() => {
+                                const todayS = new Date(); todayS.setHours(0, 0, 0, 0);
+                                const todayPaidTxns = transactions.filter(t => new Date(t.createdAt) >= todayS && (t.paymentStatus || '').toLowerCase() === 'paid');
+                                const todayTotalMini = todayPaidTxns.reduce((s, t) => s + (t.amount || 0), 0);
+                                return todayTotalMini > 0 ? (
+                                    <div style={{ padding: '10px 14px', background: 'linear-gradient(90deg, #d1fae5, #a7f3d0)', borderRadius: '10px', marginBottom: '10px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                        <span style={{ fontSize: '0.82rem', fontWeight: 700, color: '#065f46' }}>✅ Today's Collection</span>
+                                        <span style={{ fontSize: '1rem', fontWeight: 900, color: '#065f46' }}>₹{todayTotalMini.toLocaleString('en-IN')}</span>
+                                    </div>
+                                ) : null;
+                            })()}
 
-                        <span style={{ background: '#f1f5f9', color: '#475569', padding: '2px 10px', borderRadius: '20px', fontSize: '0.78rem', fontWeight: 600 }}>
-                            {filteredAppointments.length} patients
-                        </span>
-                    </div>
-                    <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
-                        {[
-                            { key: 'all', label: 'All', color: '#3b82f6' },
-                            { key: 'pending', label: 'Pending', color: '#d97706' },
-                            { key: 'confirmed', label: 'Confirmed', color: '#059669' },
-                            { key: 'completed', label: 'Completed', color: '#1d4ed8' },
-                            { key: 'cancelled', label: 'Cancelled', color: '#dc2626' },
-                        ].map(f => (
-                            <button key={f.key}
-                                onClick={() => setStatusFilter(f.key)}
-                                style={{
-                                    padding: '6px 14px', borderRadius: '8px', border: '1.5px solid',
-                                    borderColor: statusFilter === f.key ? f.color : '#e2e8f0',
-                                    background: statusFilter === f.key ? `${f.color}10` : '#fff',
-                                    color: statusFilter === f.key ? f.color : '#64748b',
-                                    cursor: 'pointer', fontWeight: 600, fontSize: '0.78rem',
-                                    transition: 'all 0.15s'
-                                }}>
-                                {f.label}
-                            </button>
-                        ))}
-                    </div>
-                </div>
-
-                {statusFilter === 'completed' && (
-                    <div style={{ padding: '12px 20px', borderBottom: '1px solid #e2e8f0' }}>
-                        <input
-                            type="text"
-                            placeholder="Search completed patients by name or ID..."
-                            value={searchQuery}
-                            onChange={e => setSearchQuery(e.target.value)}
-                            style={{ width: '100%', boxSizing: 'border-box', padding: '10px 14px', borderRadius: '8px', border: '1.5px solid #e2e8f0', fontSize: '0.9rem', outline: 'none' }}
-                        />
-                    </div>
-                )}
-
-                <div className="table-responsive">
-                    {statusFilter === 'completed' ? (
-                        <>
-                        <table className="reception-table" style={{ width: '100%', borderCollapse: 'collapse' }}>
-                            <thead>
-                                <tr style={{ background: '#f8fafc' }}>
-                                    <th style={{ padding: '12px 16px', textAlign: 'left', fontSize: '0.72rem', color: '#64748b', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', borderBottom: '1px solid #e2e8f0' }}>Patient Name</th>
-                                    <th style={{ padding: '12px 16px', textAlign: 'left', fontSize: '0.72rem', color: '#64748b', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', borderBottom: '1px solid #e2e8f0' }}>UHID (ID)</th>
-                                    <th style={{ padding: '12px 16px', textAlign: 'left', fontSize: '0.72rem', color: '#64748b', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', borderBottom: '1px solid #e2e8f0' }}>Doctor Name</th>
-                                    <th style={{ padding: '12px 16px', textAlign: 'left', fontSize: '0.72rem', color: '#64748b', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', borderBottom: '1px solid #e2e8f0' }}>Completion Date</th>
-                                    <th style={{ padding: '12px 16px', textAlign: 'left', fontSize: '0.72rem', color: '#64748b', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', borderBottom: '1px solid #e2e8f0' }}>Completion Time</th>
-                                    <th style={{ padding: '12px 16px', textAlign: 'left', fontSize: '0.72rem', color: '#64748b', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', borderBottom: '1px solid #e2e8f0' }}>Consultation Status</th>
-                                    <th style={{ padding: '12px 16px', textAlign: 'left', fontSize: '0.72rem', color: '#64748b', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', borderBottom: '1px solid #e2e8f0' }}>Actions</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {completedAppointments.filter(a => {
-                                    const q = searchQuery.toLowerCase().trim();
-                                    if (!q) return true;
-                                    return (a.userId?.name || '').toLowerCase().includes(q) || (a.userId?.patientId || a.patientId || '').toLowerCase().includes(q);
-                                }).length === 0 ? (
-                                        <tr><td colSpan="7" style={{ textAlign: 'center', color: '#888', padding: '30px' }}>No completed consultations found.</td></tr>
-                                    ) : (
-                                        completedAppointments.filter(a => {
-                                            const q = searchQuery.toLowerCase().trim();
-                                            if (!q) return true;
-                                            return (a.userId?.name || '').toLowerCase().includes(q) || (a.userId?.patientId || a.patientId || '').toLowerCase().includes(q);
-                                        }).map((a, idx) => {
-                                            const compDate = a.completedAt ? new Date(a.completedAt) : new Date(a.updatedAt);
-                                            const isCurrentlyAdmitted = admissions.some(adm => (adm.appointmentId?._id || adm.appointmentId) === a._id && (adm.status === 'Admitted' || adm.status === 'Pending Allocation'));
-                                            return (
-                                                <tr key={a._id || idx}
-                                                    style={{ borderBottom: '1px solid #f1f5f9', transition: 'background 0.15s' }}
-                                                    onMouseEnter={e => e.currentTarget.style.background = '#f8fafc'}
-                                                    onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
-                                                    <td style={{ padding: '12px 16px', fontWeight: 'bold', color: '#1e293b' }}>
-                                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                                            <span>{a.userId?.name || 'Walk-in Patient'}</span>
-                                                            {a.recommendAdmission && !isCurrentlyAdmitted && (
-                                                                <span style={{
-                                                                    background: '#fee2e2',
-                                                                    color: '#b91c1c',
-                                                                    fontSize: '10px',
-                                                                    fontWeight: 800,
-                                                                    padding: '2px 8px',
-                                                                    borderRadius: '12px',
-                                                                    border: '1px solid #fca5a5',
-                                                                    display: 'inline-flex',
-                                                                    alignItems: 'center',
-                                                                    gap: '3px',
-                                                                    animation: 'pulse 2s infinite'
-                                                                }} title={`Recommended by Doctor. Notes: ${a.recommendAdmissionNotes || 'None'}`}>
-                                                                    🚨 Admit Recommended
-                                                                </span>
-                                                            )}
-                                                            {isCurrentlyAdmitted && (
-                                                                <span style={{
-                                                                    background: '#e0f2fe',
-                                                                    color: '#0369a1',
-                                                                    fontSize: '10px',
-                                                                    fontWeight: 800,
-                                                                    padding: '2px 8px',
-                                                                    borderRadius: '12px',
-                                                                    border: '1px solid #bae6fd',
-                                                                    display: 'inline-flex',
-                                                                    alignItems: 'center',
-                                                                    gap: '3px'
-                                                                }}>
-                                                                    🏥 Admitted
-                                                                </span>
-                                                            )}
-                                                        </div>
-                                                    </td>
-                                                    <td style={{ padding: '12px 16px' }}>
-                                                        {a.userId?.patientId || a.patientId || 'N/A'}
-                                                    </td>
-                                                    <td style={{ padding: '12px 16px', color: '#0d9488', fontWeight: 600 }}>
-                                                        Dr. {a.doctorName || 'General'}
-                                                    </td>
-                                                    <td style={{ padding: '12px 16px' }}>
-                                                        {compDate.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}
-                                                    </td>
-                                                    <td style={{ padding: '12px 16px' }}>
-                                                        {compDate.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}
-                                                    </td>
-                                                    <td style={{ padding: '12px 16px' }}>
-                                                        <span style={{ padding: '4px 10px', borderRadius: '20px', fontSize: '0.75rem', fontWeight: 'bold', background: '#dbeafe', color: '#1e40af' }}>
-                                                            {a.status || 'completed'}
-                                                        </span>
-                                                    </td>
-                                                    <td style={{ padding: '12px 16px' }}>
-                                                        <div style={{ display: 'flex', gap: '4px' }}>
-                                                            {a.recommendAdmission && !isCurrentlyAdmitted && (
-                                                                <button onClick={() => openHospitalizeModal(a)}
-                                                                    style={{ padding: '5px 10px', fontSize: '0.72rem', background: '#dbeafe', color: '#1d4ed8', border: '1px solid #93c5fd', borderRadius: '6px', cursor: 'pointer', fontWeight: 600 }}>
-                                                                    🏥 Admit
-                                                                </button>
-                                                            )}
-                                                        </div>
-                                                    </td>
-                                                </tr>
-                                            );
-                                        })
-                                    )}
-                            </tbody>
-                            </table>
-                        </>
-                    ) : (
-                        <table className="reception-table" style={{ width: '100%', borderCollapse: 'collapse' }}>
-                            <thead>
-                                <tr style={{ background: '#f8fafc' }}>
-                                    <th style={{ padding: '12px 16px', textAlign: 'left', fontSize: '0.72rem', color: '#64748b', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', borderBottom: '1px solid #e2e8f0' }}>#</th>
-                                    <th style={{ padding: '12px 16px', textAlign: 'left', fontSize: '0.72rem', color: '#64748b', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', borderBottom: '1px solid #e2e8f0' }}>Patient</th>
-                                    <th style={{ padding: '12px 16px', textAlign: 'left', fontSize: '0.72rem', color: '#64748b', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', borderBottom: '1px solid #e2e8f0' }}>Doctor</th>
-                                    <th style={{ padding: '12px 16px', textAlign: 'left', fontSize: '0.72rem', color: '#64748b', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', borderBottom: '1px solid #e2e8f0' }}>{hospitalContext?.appointmentMode === 'token' ? 'Token' : 'Time'}</th>
-                                    <th style={{ padding: '12px 16px', textAlign: 'left', fontSize: '0.72rem', color: '#64748b', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', borderBottom: '1px solid #e2e8f0' }}>Payment</th>
-                                    <th style={{ padding: '12px 16px', textAlign: 'left', fontSize: '0.72rem', color: '#64748b', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', borderBottom: '1px solid #e2e8f0' }}>Status</th>
-                                    <th style={{ padding: '12px 16px', textAlign: 'left', fontSize: '0.72rem', color: '#64748b', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', borderBottom: '1px solid #e2e8f0' }}>Actions</th>
-                                </tr>
-                            </thead>
-                        <tbody>
-                            {filteredAppointments.length === 0 ? (
-                                <tr>
-                                    <td colSpan="7" style={{ textAlign: 'center', padding: '40px 20px', color: '#94a3b8' }}>
-                                        <div style={{ fontSize: '2rem', marginBottom: '8px' }}>{statusFilter === 'all' ? '📭' : '🔍'}</div>
-                                        <div style={{ fontWeight: 600, fontSize: '0.95rem' }}>
-                                            {statusFilter === 'all' ? 'No appointments today' : `No ${statusFilter} appointments`}
-                                        </div>
-                                        <div style={{ fontSize: '0.82rem', marginTop: '4px' }}>
-                                            {statusFilter === 'all' ? 'New registrations will appear here.' : 'No appointments match this status filter.'}
-                                        </div>
-                                    </td>
-                                </tr>
-                            ) : (
-                                filteredAppointments.map((apt, idx) => {
-                                    const payStatus = (apt.paymentStatus || '').toLowerCase();
-                                    const isCurrentlyAdmitted = admissions.some(adm => (adm.appointmentId?._id || adm.appointmentId) === apt._id && (adm.status === 'Admitted' || adm.status === 'Pending Allocation'));
-                                    return (
-                                        <tr key={apt._id}
-                                            style={{ borderBottom: '1px solid #f1f5f9', transition: 'background 0.15s' }}
-                                            onMouseEnter={e => e.currentTarget.style.background = '#f8fafc'}
-                                            onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
-                                            <td style={{ padding: '12px 16px', color: '#94a3b8', fontWeight: 600, fontSize: '0.82rem' }}>{idx + 1}</td>
-                                            <td style={{ padding: '12px 16px' }}>
-                                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                                    <div style={{ fontWeight: 700, fontSize: '0.88rem', color: '#1e293b' }}>{apt.userId?.name || 'Walk-in'}</div>
-                                                    {apt.recommendAdmission && !isCurrentlyAdmitted && (
-                                                        <span style={{
-                                                            background: '#fee2e2',
-                                                            color: '#b91c1c',
-                                                            fontSize: '10px',
-                                                            fontWeight: 800,
-                                                            padding: '2px 8px',
-                                                            borderRadius: '12px',
-                                                            border: '1px solid #fca5a5',
-                                                            display: 'inline-flex',
-                                                            alignItems: 'center',
-                                                            gap: '3px',
-                                                            animation: 'pulse 2s infinite'
-                                                        }} title={`Recommended by Doctor. Notes: ${apt.recommendAdmissionNotes || 'None'}`}>
-                                                            🚨 Admit Recommended
-                                                        </span>
-                                                    )}
-                                                    {isCurrentlyAdmitted && (
-                                                        <span style={{
-                                                            background: '#e0f2fe',
-                                                            color: '#0369a1',
-                                                            fontSize: '10px',
-                                                            fontWeight: 800,
-                                                            padding: '2px 8px',
-                                                            borderRadius: '12px',
-                                                            border: '1px solid #bae6fd',
-                                                            display: 'inline-flex',
-                                                            alignItems: 'center',
-                                                            gap: '3px'
-                                                        }}>
-                                                            🏥 Admitted
-                                                        </span>
-                                                    )}
+                            {/* Transactions List */}
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                                {transactions.slice(0, 4).length === 0 ? (
+                                    <div style={{ textAlign: 'center', padding: '40px 0', color: '#94a3b8' }}>
+                                        <span style={{ fontSize: '2rem' }}>🧾</span>
+                                        <p style={{ margin: '8px 0 0', fontSize: '0.88rem' }}>No recent transactions recorded today.</p>
+                                    </div>
+                                ) : (
+                                    transactions.slice(0, 4).map(t => {
+                                        const isPaid = (t.paymentStatus || '').toLowerCase() === 'paid';
+                                        return (
+                                            <div key={t._id} style={{
+                                                display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                                                padding: '12px 14px', background: '#f8fafc', borderRadius: '12px',
+                                                border: '1px solid #f1f5f9', transition: 'transform 0.15s'
+                                            }}
+                                                onMouseEnter={e => { e.currentTarget.style.transform = 'translateX(2px)'; }}
+                                                onMouseLeave={e => { e.currentTarget.style.transform = 'translateX(0)'; }}
+                                            >
+                                                <div>
+                                                    <div style={{ fontWeight: 700, fontSize: '0.88rem', color: '#1e293b' }}>
+                                                        {t.userId?.name || 'Walk-in Patient'}
+                                                    </div>
+                                                    <div style={{ fontSize: '0.78rem', color: '#64748b', marginTop: '2px' }}>
+                                                        Dr. {t.doctorName || '-'} • <span style={{ fontWeight: 600 }}>{t.paymentMethod || 'Cash'}</span>
+                                                    </div>
                                                 </div>
-                                                <div style={{ fontSize: '0.75rem', color: '#94a3b8' }}>📱 {apt.userId?.phone || '-'} {apt.userId?.patientId ? `| ${apt.userId.patientId}` : ''}</div>
-                                            </td>
-                                            <td style={{ padding: '12px 16px', fontSize: '0.85rem', color: '#475569', fontWeight: 500 }}>
-                                                <span style={{ color: '#0d9488', fontWeight: 600 }}>Dr.</span> {apt.doctorName || 'N/A'}
-                                                {apt.serviceName && <div style={{ fontSize: '0.72rem', color: '#94a3b8' }}>{apt.serviceName}</div>}
-                                            </td>
-                                            <td style={{ padding: '12px 16px', fontWeight: 700, fontSize: '0.9rem', color: '#1e293b' }}>
-                                                {apt.tokenNumber != null
-                                                    ? <span style={{ color: '#d97706' }}>#{apt.tokenNumber}</span>
-                                                    : apt.appointmentTime?.startsWith('token-')
-                                                        ? <span style={{ color: '#d97706' }}>#{apt.appointmentTime.replace('token-', '')}</span>
-                                                        : apt.appointmentTime || '-'}
-                                            </td>
-                                            <td style={{ padding: '12px 16px' }}>
-                                                <span style={{
-                                                    padding: '3px 10px', borderRadius: '6px', fontSize: '0.75rem', fontWeight: 700,
-                                                    background: payStatus === 'paid' ? '#dcfce7' : '#fef3c7',
-                                                    color: payStatus === 'paid' ? '#166534' : '#92400e'
-                                                }}>
-                                                    {payStatus === 'paid' ? 'Paid' : apt.paymentStatus || 'Pending'}
-                                                    {apt.amount > 0 && ` • ₹${Number(apt.amount).toLocaleString('en-IN')}`}
-                                                </span>
-                                            </td>
-                                            <td style={{ padding: '12px 16px' }}>
-                                                <span style={{
-                                                    padding: '4px 12px', borderRadius: '20px', fontSize: '0.75rem', fontWeight: 700, textTransform: 'capitalize',
-                                                    background: apt.status === 'confirmed' ? '#dcfce7' : apt.status === 'completed' ? '#dbeafe' : apt.status === 'cancelled' ? '#fee2e2' : '#fef3c7',
-                                                    color: apt.status === 'confirmed' ? '#166534' : apt.status === 'completed' ? '#1e40af' : apt.status === 'cancelled' ? '#991b1b' : '#92400e'
-                                                }}>{apt.status}</span>
-                                            </td>
-                                            <td style={{ padding: '12px 16px' }}>
-                                                <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
-                                                    {apt.status === 'pending' && (apt.userId?._id || apt.userId) && (
-                                                        <button onClick={() => handleCheckIn(apt)}
-                                                            style={{ padding: '5px 10px', fontSize: '0.72rem', background: '#0d9488', color: '#fff', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 600 }}>
-                                                            Check In
-                                                        </button>
-                                                    )}
-                                                    {payStatus !== 'paid' && apt.status !== 'cancelled' && (
-                                                        <button onClick={() => setPaymentModal({ open: true, appointment: apt, method: apt.paymentMethod || 'Cash' })}
-                                                            style={{ padding: '5px 10px', fontSize: '0.72rem', background: '#dcfce7', color: '#166534', border: '1px solid #86efac', borderRadius: '6px', cursor: 'pointer', fontWeight: 600 }}>
-                                                            💰 Pay
-                                                        </button>
-                                                    )}
-                                                    {payStatus === 'paid' && (
-                                                        <button onClick={() => generateReceiptPDF(apt)}
-                                                            style={{ padding: '5px 10px', fontSize: '0.72rem', background: '#eff6ff', color: '#1d4ed8', border: '1px solid #93c5fd', borderRadius: '6px', cursor: 'pointer', fontWeight: 600 }}>
-                                                            🧾 Receipt
-                                                        </button>
-                                                    )}
-                                                    {((apt.status !== 'cancelled' && apt.status !== 'completed' && !isCurrentlyAdmitted) || (apt.recommendAdmission && !isCurrentlyAdmitted)) && (
-                                                        <>
-                                                            <button onClick={() => openHospitalizeModal(apt)}
-                                                                style={{ padding: '5px 10px', fontSize: '0.72rem', background: '#dbeafe', color: '#1d4ed8', border: '1px solid #93c5fd', borderRadius: '6px', cursor: 'pointer', fontWeight: 600 }}>
-                                                                🏥 Admit
-                                                            </button>
-                                                            {apt.status !== 'completed' && (
-                                                                <button onClick={() => handleCancelAppointment(apt._id)}
-                                                                    style={{ padding: '5px 10px', fontSize: '0.72rem', background: '#fee2e2', color: '#dc2626', border: '1px solid #fca5a5', borderRadius: '6px', cursor: 'pointer', fontWeight: 600 }}>
-                                                                    ✕ Cancel
-                                                                </button>
-                                                            )}
-                                                        </>
-                                                    )}
+                                                <div style={{ textAlign: 'right' }}>
+                                                    <div style={{ fontWeight: 800, fontSize: '0.92rem', color: '#16a34a' }}>
+                                                        ₹{t.amount}
+                                                    </div>
+                                                    <span style={{
+                                                        display: 'inline-block', padding: '2px 8px', borderRadius: '12px',
+                                                        fontSize: '0.7rem', fontWeight: 700, marginTop: '4px',
+                                                        background: isPaid ? '#dcfce7' : '#fee2e2',
+                                                        color: isPaid ? '#15803d' : '#991b1b'
+                                                    }}>
+                                                        {isPaid ? 'Paid' : 'Pending'}
+                                                    </span>
                                                 </div>
-                                            </td>
-                                        </tr>
-                                    );
-                                })
-                            )}
-                        </tbody>
-                    </table>
-                    )}
-                </div>
-            </div>
-        </div>
-
-        {/* Payment Confirmation Modal */}
-        {paymentModal.open && (
-            <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '16px' }}>
-                <div style={{ background: '#fff', borderRadius: '14px', padding: '28px', width: '100%', maxWidth: '440px', boxShadow: '0 20px 60px rgba(0,0,0,0.2)' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
-                        <div>
-                            <h2 style={{ margin: 0, fontSize: '1.2rem', fontWeight: 700 }}>💰 Confirm Payment</h2>
-                            <p style={{ margin: '4px 0 0', color: '#64748b', fontSize: '0.88rem' }}>
-                                {paymentModal.appointment?.userId?.name} — Rs. {Number(paymentModal.appointment?.amount || 0).toLocaleString('en-IN')}
-                            </p>
-                        </div>
-                        <button onClick={() => setPaymentModal({ open: false, appointment: null, method: 'Cash' })} style={{ background: 'none', border: 'none', fontSize: '1.4rem', cursor: 'pointer', color: '#94a3b8' }}>✕</button>
-                    </div>
-                    <div style={{ marginBottom: '18px' }}>
-                        <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, color: '#374151', marginBottom: '7px' }}>Payment Method</label>
-                        <select
-                            value={paymentModal.method}
-                            onChange={e => setPaymentModal(p => ({ ...p, method: e.target.value }))}
-                            style={{ width: '100%', padding: '10px 12px', border: '1.5px solid #e2e8f0', borderRadius: '8px', fontSize: '0.95rem' }}
-                        >
-                            <option value="Cash">Cash</option>
-                            <option value="UPI">UPI</option>
-                            <option value="Card">Card</option>
-                            <option value="Cheque">Cheque</option>
-                            <option value="NEFT/RTGS">NEFT / RTGS</option>
-                        </select>
-                    </div>
-                    <div style={{ display: 'flex', gap: '10px' }}>
-                        <button
-                            onClick={handleConfirmPayment}
-                            disabled={confirmingPayment}
-                            style={{ flex: 1, padding: '11px', background: '#16a34a', color: '#fff', border: 'none', borderRadius: '8px', fontWeight: 700, fontSize: '0.95rem', cursor: 'pointer' }}
-                        >
-                            {confirmingPayment ? 'Confirming...' : '✓ Confirm & Print Receipt'}
-                        </button>
-                        <button
-                            onClick={() => setPaymentModal({ open: false, appointment: null, method: 'Cash' })}
-                            style={{ padding: '11px 18px', background: '#f1f5f9', border: '1px solid #e2e8f0', borderRadius: '8px', cursor: 'pointer', fontWeight: '600', fontSize: '0.9rem' }}
-                        >
-                            Cancel
-                        </button>
-                    </div>
-                </div>
-            </div>
-        )}
-
-        {/* Hospitalize Modal */}
-        {hospitalizeModal.open && (
-            <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '16px' }}>
-                <div style={{ background: '#fff', borderRadius: '14px', padding: '28px', width: '100%', maxWidth: '580px', maxHeight: '90vh', overflowY: 'auto', boxShadow: '0 20px 60px rgba(0,0,0,0.2)' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
-                        <div>
-                            <h2 style={{ margin: 0, fontSize: '1.3rem', fontWeight: 700 }}>Hospitalize Patient</h2>
-                            <p style={{ margin: '4px 0 0', color: '#64748b', fontSize: '0.9rem' }}>
-                                {hospitalizeModal.appointment?.userId?.name} — {hospitalizeModal.appointment?.doctorName}
-                            </p>
-                        </div>
-                        <button onClick={() => setHospitalizeModal({ open: false, appointment: null })} style={{ background: 'none', border: 'none', fontSize: '1.4rem', cursor: 'pointer', color: '#94a3b8' }}>✕</button>
-                    </div>
-
-                    {/* Bed & Ward */}
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px', marginBottom: '16px' }}>
-                        <div>
-                            <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, color: '#374151', marginBottom: '5px' }}>Ward / Room</label>
-                            <input
-                                type="text"
-                                placeholder="e.g. General Ward, ICU"
-                                value={hospitalizeForm.ward}
-                                onChange={e => setHospitalizeForm(p => ({ ...p, ward: e.target.value }))}
-                                style={{ width: '100%', padding: '9px 12px', border: '1.5px solid #e2e8f0', borderRadius: '8px', fontSize: '0.95rem', boxSizing: 'border-box' }}
-                            />
-                        </div>
-                        <div>
-                            <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, color: '#374151', marginBottom: '5px' }}>Bed Number</label>
-                            <input
-                                type="text"
-                                placeholder="e.g. B-12"
-                                value={hospitalizeForm.bedNumber}
-                                onChange={e => setHospitalizeForm(p => ({ ...p, bedNumber: e.target.value }))}
-                                style={{ width: '100%', padding: '9px 12px', border: '1.5px solid #e2e8f0', borderRadius: '8px', fontSize: '0.95rem', boxSizing: 'border-box' }}
-                            />
-                        </div>
-                    </div>
-
-                    <div style={{ marginBottom: '16px' }}>
-                        <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, color: '#374151', marginBottom: '5px' }}>Admission Date</label>
-                        <input
-                            type="date"
-                            value={hospitalizeForm.admissionDate}
-                            onChange={e => setHospitalizeForm(p => ({ ...p, admissionDate: e.target.value }))}
-                            style={{ padding: '9px 12px', border: '1.5px solid #e2e8f0', borderRadius: '8px', fontSize: '0.95rem' }}
-                        />
-                    </div>
-
-                    {/* Facilities */}
-                    {(hospitalContext?.facilities?.length > 0) ? (
-                        <div style={{ marginBottom: '16px' }}>
-                            <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, color: '#374151', marginBottom: '10px' }}>
-                                Select Facilities &amp; Days
-                            </label>
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                                {hospitalContext.facilities.map(f => (
-                                    <div key={f.name} style={{ display: 'flex', alignItems: 'center', gap: '12px', padding: '10px 14px', background: '#f8fafc', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
-                                        <div style={{ flex: 1 }}>
-                                            <div style={{ fontWeight: 600, fontSize: '0.9rem' }}>{f.name}</div>
-                                            <div style={{ fontSize: '0.8rem', color: '#64748b' }}>₹{f.pricePerDay}/day</div>
-                                        </div>
-                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                            <label style={{ fontSize: '0.82rem', color: '#475569' }}>Days:</label>
-                                            <input
-                                                type="number"
-                                                min="0"
-                                                placeholder="0"
-                                                value={hospitalizeForm.facilityDays[f.name] || ''}
-                                                onChange={e => setHospitalizeForm(p => ({ ...p, facilityDays: { ...p.facilityDays, [f.name]: e.target.value } }))}
-                                                style={{ width: '70px', padding: '6px 10px', border: '1.5px solid #e2e8f0', borderRadius: '7px', fontSize: '0.9rem', textAlign: 'center' }}
-                                            />
-                                        </div>
-                                        {hospitalizeForm.facilityDays[f.name] > 0 && (
-                                            <div style={{ fontWeight: 700, color: '#1d4ed8', fontSize: '0.9rem', minWidth: '70px', textAlign: 'right' }}>
-                                                ₹{(f.pricePerDay * Number(hospitalizeForm.facilityDays[f.name])).toLocaleString('en-IN')}
                                             </div>
-                                        )}
+                                        );
+                                    })
+                                )}
+                            </div>
+                        </div>
+
+                        {/* Quick System Action Alerts */}
+                        <div style={{
+                            marginTop: '20px',
+                            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                            background: '#eff6ff', padding: '12px 16px', borderRadius: '12px', border: '1px solid #bfdbfe'
+                        }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                <span style={{ fontSize: '1.2rem' }}>ℹ️</span>
+                                <span style={{ fontSize: '0.82rem', color: '#1e40af', fontWeight: 600 }}>
+                                    System Auto-refresh is enabled. Live connection active.
+                                </span>
+                            </div>
+                            <span style={{
+                                width: '8px', height: '8px', background: '#10b981',
+                                borderRadius: '50%', display: 'inline-block', boxShadow: '0 0 8px #10b981'
+                            }}></span>
+                        </div>
+
+                    </div>
+
+                </div>
+
+                {/* SEARCH + QUICK BOOK ROW */}
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', marginBottom: '20px' }}>
+                    {/* SEARCH SECTION */}
+                    <div className="search-section card" style={{ padding: '16px', position: 'relative', background: '#fff', borderRadius: '12px', border: '1px solid #e2e8f0' }}>
+                        <h4 style={{ margin: '0 0 8px', fontSize: '0.82rem', color: '#64748b', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em' }}>🔍 Find Patient</h4>
+                        <div style={{ display: 'flex', gap: '8px' }}>
+                            <input
+                                type="text"
+                                placeholder="Search by Name, Mobile or MRN..."
+                                value={searchQuery}
+                                onChange={handleSearch}
+                                style={{ flex: 1, padding: '10px 14px', fontSize: '0.9rem', borderRadius: '8px', border: '1.5px solid #e2e8f0', outline: 'none' }}
+                            />
+                        </div>
+                        {searchResults.length > 0 && (
+                            <div className="search-results-dropdown" style={{
+                                position: 'absolute', top: '76px', left: '16px', right: '16px',
+                                background: 'white', border: '1px solid #e2e8f0', boxShadow: '0 8px 24px rgba(0,0,0,0.12)',
+                                zIndex: 1000, maxHeight: '280px', overflowY: 'auto', borderRadius: '10px'
+                            }}>
+                                {searchResults.map(p => (
+                                    <div key={p._id} style={{ padding: '12px 14px', borderBottom: '1px solid #f1f5f9', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                        <div>
+                                            <div style={{ fontWeight: 600, fontSize: '0.95rem', color: '#1e293b' }}>{p.name} <span style={{ color: '#94a3b8', fontSize: '0.8rem' }}>({p.patientId || 'N/A'})</span></div>
+                                            <div style={{ fontSize: '0.82rem', color: '#94a3b8' }}>📱 {p.phone}</div>
+                                        </div>
+                                        <div style={{ display: 'flex', gap: '6px' }}>
+                                            <button onClick={() => handleViewProfile(p)}
+                                                style={{ padding: '5px 12px', fontSize: '0.8rem', background: '#f0f4ff', color: '#3b82f6', border: '1.5px solid #3b82f6', borderRadius: '6px', cursor: 'pointer', fontWeight: 600 }}>
+                                                View
+                                            </button>
+                                            <button onClick={() => handleEditPatient(p)}
+                                                style={{ padding: '5px 12px', fontSize: '0.8rem', background: '#0d9488', color: '#fff', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 600 }}>
+                                                Book
+                                            </button>
+                                            <button onClick={() => navigate(`/billing/patient?search=${encodeURIComponent(p.patientId || p.name)}`)}
+                                                style={{ padding: '5px 12px', fontSize: '0.8rem', background: 'rgba(16,185,129,0.15)', color: '#10b981', border: '1px solid #10b981', borderRadius: '6px', cursor: 'pointer', fontWeight: 600 }}>
+                                                🧾 Billing
+                                            </button>
+                                        </div>
                                     </div>
                                 ))}
                             </div>
-                            {/* Total */}
-                            {Object.values(hospitalizeForm.facilityDays).some(d => d > 0) && (
-                                <div style={{ marginTop: '12px', padding: '10px 14px', background: '#eff6ff', borderRadius: '8px', display: 'flex', justifyContent: 'space-between', fontWeight: 700 }}>
-                                    <span>Total Facility Cost:</span>
-                                    <span style={{ color: '#1d4ed8' }}>
-                                        ₹{(hospitalContext.facilities.reduce((sum, f) => sum + (f.pricePerDay * (Number(hospitalizeForm.facilityDays[f.name]) || 0)), 0)).toLocaleString('en-IN')}
-                                    </span>
+                        )}
+                    </div>
+
+                    {/* AVAILABILITY WIDGET */}
+                    <div className="availability-widget card" style={{ padding: '16px', background: '#fff', borderRadius: '12px', border: '1px solid #e2e8f0' }}>
+                        <h4 style={{ margin: '0 0 8px', fontSize: '0.82rem', color: '#64748b', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em' }}>📅 Quick Availability</h4>
+                        <div className="widget-controls" style={{ display: 'flex', gap: '8px', marginBottom: '10px' }}>
+                            <select className="avail-select" onChange={(e) => setAvailabilityCheck({ ...availabilityCheck, doctorId: e.target.value })}
+                                style={{ flex: 1, padding: '10px', borderRadius: '8px', border: '1.5px solid #e2e8f0', fontSize: '0.85rem' }}>
+                                <option value="">Select Doctor</option>
+                                {doctorsList.map(d => <option key={d._id} value={d._id}>{d.name}</option>)}
+                            </select>
+                            <input type="date" value={availabilityCheck.date} onChange={(e) => setAvailabilityCheck({ ...availabilityCheck, date: e.target.value })}
+                                style={{ padding: '10px', borderRadius: '8px', border: '1.5px solid #e2e8f0', fontSize: '0.85rem' }} />
+                        </div>
+                        {availabilityCheck.doctorId && (
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
+                                {timeSlots.map(t => {
+                                    const isBooked = availabilityCheck.bookedSlots.includes(t);
+                                    const isPast = availabilityCheck.date === todayStr && (() => {
+                                        const [h, m] = t.split(':').map(Number);
+                                        const now = new Date();
+                                        return new Date(now.getFullYear(), now.getMonth(), now.getDate(), h, m) <= now;
+                                    })();
+                                    return (
+                                        <button key={t} type="button"
+                                            onClick={() => !isBooked && !isPast && handleSlotClick(t)}
+                                            disabled={isBooked || isPast}
+                                            style={{
+                                                padding: '6px 10px', fontSize: '0.78rem', borderRadius: '6px', border: '1px solid #e2e8f0',
+                                                background: isBooked ? '#fee2e2' : isPast ? '#f1f5f9' : '#fff',
+                                                color: isBooked ? '#dc2626' : isPast ? '#94a3b8' : '#1e293b',
+                                                cursor: isBooked || isPast ? 'not-allowed' : 'pointer', fontWeight: 600,
+                                                opacity: isBooked || isPast ? 0.6 : 1
+                                            }}
+                                        >
+                                            {t}
+                                        </button>
+                                    );
+                                })}
+                            </div>
+                        )}
+                    </div>
+                </div>
+
+                {/* TODAY'S QUEUE WITH STATUS FILTER */}
+                <div className="appointments-list" style={{ background: '#fff', borderRadius: '12px', border: '1px solid #e2e8f0', overflow: 'hidden' }}>
+                    <div style={{
+                        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                        padding: '16px 20px', borderBottom: '1px solid #e2e8f0', flexWrap: 'wrap', gap: '10px'
+                    }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+                            <h3 style={{ margin: 0, fontSize: '1.05rem', color: '#1e293b', fontWeight: 700 }}>
+                                {statusFilter === 'report_follow_up' ? "Pending Report Follow-ups 📝" : dateTab === 'today' ? "Today's Queue" : dateTab === 'tomorrow' ? "Tomorrow's Schedule" : dateTab === 'future' ? "Future Schedule" : "Patient Queue"}
+                            </h3>
+                            
+                            {/* Date Range Tabs Selector */}
+                            {statusFilter !== 'report_follow_up' && (
+                                <div style={{ display: 'flex', background: '#f1f5f9', padding: '3px', borderRadius: '8px', gap: '2px' }}>
+                                    {[
+                                        { id: 'today', label: 'Today' },
+                                        { id: 'tomorrow', label: 'Tomorrow' },
+                                        { id: 'future', label: 'Future' }
+                                    ].map(t => (
+                                        <button
+                                            key={t.id}
+                                            type="button"
+                                            onClick={() => {
+                                                setDateTab(t.id);
+                                                if (t.id === 'today') {
+                                                    setSelectedQueueDate(todayStr);
+                                                    fetchAppointments(todayStr, false, false);
+                                                } else if (t.id === 'tomorrow') {
+                                                    const tom = new Date(); tom.setDate(tom.getDate() + 1);
+                                                    const tomStr = getLocalDateString(tom);
+                                                    setSelectedQueueDate(tomStr);
+                                                    fetchAppointments(tomStr, false, true);
+                                                } else {
+                                                    setSelectedQueueDate('');
+                                                    fetchAppointments('', true, false);
+                                                }
+                                            }}
+                                            style={{
+                                                padding: '4px 10px',
+                                                borderRadius: '6px',
+                                                border: 'none',
+                                                fontSize: '0.78rem',
+                                                fontWeight: '700',
+                                                cursor: 'pointer',
+                                                background: dateTab === t.id ? '#fff' : 'transparent',
+                                                color: dateTab === t.id ? '#1e293b' : '#64748b',
+                                                boxShadow: dateTab === t.id ? '0 1px 3px rgba(0,0,0,0.1)' : 'none',
+                                                transition: 'all 0.15s'
+                                            }}
+                                        >
+                                            {t.label}
+                                        </button>
+                                    ))}
                                 </div>
                             )}
+
+                            {dateTab !== 'future' && statusFilter !== 'report_follow_up' && (
+                                <input
+                                    type="date"
+                                    value={selectedQueueDate}
+                                    onChange={(e) => {
+                                        const newDate = e.target.value;
+                                        setSelectedQueueDate(newDate);
+                                        const tom = new Date(); tom.setDate(tom.getDate() + 1);
+                                        const tomStr = tom.toISOString().split('T')[0];
+                                        setDateTab(newDate === todayStr ? 'today' : newDate === tomStr ? 'tomorrow' : 'custom');
+                                        fetchAppointments(newDate, false);
+                                    }}
+                                    style={{
+                                        padding: '5px 10px',
+                                        borderRadius: '8px',
+                                        border: '1.5px solid #e2e8f0',
+                                        fontSize: '0.8rem',
+                                        color: '#475569',
+                                        fontWeight: '600',
+                                        outline: 'none',
+                                        cursor: 'pointer',
+                                        background: '#f8fafc'
+                                    }}
+                                />
+                            )}
+
+                            <span style={{ background: '#f1f5f9', color: '#475569', padding: '2px 10px', borderRadius: '20px', fontSize: '0.78rem', fontWeight: 600 }}>
+                                {filteredAppointments.length} patients
+                            </span>
                         </div>
-                    ) : (
-                        <div style={{ padding: '12px 14px', background: '#fef9c3', borderRadius: '8px', fontSize: '0.88rem', color: '#92400e', marginBottom: '16px' }}>
-                            No facilities configured. Hospital admin can add facilities from the Hospital Admin Dashboard.
+                        <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
+                            {[
+                                { key: 'all', label: 'All', color: '#3b82f6' },
+                                { key: 'pending', label: 'Pending', color: '#d97706' },
+                                { key: 'confirmed', label: 'Confirmed', color: '#059669' },
+                                { key: 'completed', label: 'Completed', color: '#1d4ed8' },
+                                { key: 'cancelled', label: 'Cancelled', color: '#dc2626' },
+                                { key: 'report_follow_up', label: 'Report Follow-ups 📝', color: '#8b5cf6' },
+                            ].map(f => (
+                                <button key={f.key}
+                                    onClick={() => {
+                                        setStatusFilter(f.key);
+                                        if (f.key === 'report_follow_up') {
+                                            fetchAppointments(undefined, undefined, undefined, true);
+                                        } else {
+                                            fetchAppointments(selectedQueueDate, dateTab === 'future', dateTab === 'tomorrow', false);
+                                        }
+                                    }}
+                                    style={{
+                                        padding: '6px 14px', borderRadius: '8px', border: '1.5px solid',
+                                        borderColor: statusFilter === f.key ? f.color : '#e2e8f0',
+                                        background: statusFilter === f.key ? `${f.color}10` : '#fff',
+                                        color: statusFilter === f.key ? f.color : '#64748b',
+                                        cursor: 'pointer', fontWeight: 600, fontSize: '0.78rem',
+                                        transition: 'all 0.15s'
+                                    }}>
+                                    {f.label}
+                                </button>
+                            ))}
+                        </div>
+                    </div>
+
+                    {statusFilter === 'completed' && (
+                        <div style={{ padding: '12px 20px', borderBottom: '1px solid #e2e8f0' }}>
+                            <input
+                                type="text"
+                                placeholder="Search completed patients by name or ID..."
+                                value={searchQuery}
+                                onChange={e => setSearchQuery(e.target.value)}
+                                style={{ width: '100%', boxSizing: 'border-box', padding: '10px 14px', borderRadius: '8px', border: '1.5px solid #e2e8f0', fontSize: '0.9rem', outline: 'none' }}
+                            />
                         </div>
                     )}
 
-                    <div style={{ marginBottom: '20px' }}>
-                        <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, color: '#374151', marginBottom: '5px' }}>Notes (optional)</label>
-                        <textarea
-                            placeholder="Any notes for admission..."
-                            value={hospitalizeForm.notes}
-                            onChange={e => setHospitalizeForm(p => ({ ...p, notes: e.target.value }))}
-                            rows={2}
-                            style={{ width: '100%', padding: '9px 12px', border: '1.5px solid #e2e8f0', borderRadius: '8px', fontSize: '0.9rem', resize: 'vertical', boxSizing: 'border-box' }}
-                        />
-                    </div>
-
-                    <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
-                        <button onClick={() => setHospitalizeModal({ open: false, appointment: null })} style={{ padding: '10px 20px', background: '#f1f5f9', border: '1px solid #cbd5e1', borderRadius: '8px', cursor: 'pointer', fontWeight: 600, color: '#475569' }}>
-                            Cancel
-                        </button>
-                        <button
-                            onClick={handleHospitalize}
-                            disabled={hospitalizingSaving}
-                            style={{ padding: '10px 24px', background: '#1d4ed8', color: '#fff', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: 700, fontSize: '0.95rem', opacity: hospitalizingSaving ? 0.6 : 1 }}
-                        >
-                            {hospitalizingSaving ? 'Admitting...' : 'Admit Patient'}
-                        </button>
+                    <div className="table-responsive">
+                        {statusFilter === 'completed' ? (
+                            <>
+                            <table className="reception-table" style={{ width: '100%', borderCollapse: 'collapse' }}>
+                                <thead>
+                                    <tr style={{ background: '#f8fafc' }}>
+                                        <th style={{ padding: '12px 16px', textAlign: 'left', fontSize: '0.72rem', color: '#64748b', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', borderBottom: '1px solid #e2e8f0' }}>Patient Name</th>
+                                        <th style={{ padding: '12px 16px', textAlign: 'left', fontSize: '0.72rem', color: '#64748b', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', borderBottom: '1px solid #e2e8f0' }}>UHID (ID)</th>
+                                        <th style={{ padding: '12px 16px', textAlign: 'left', fontSize: '0.72rem', color: '#64748b', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', borderBottom: '1px solid #e2e8f0' }}>Doctor Name</th>
+                                        <th style={{ padding: '12px 16px', textAlign: 'left', fontSize: '0.72rem', color: '#64748b', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', borderBottom: '1px solid #e2e8f0' }}>Completion Date</th>
+                                        <th style={{ padding: '12px 16px', textAlign: 'left', fontSize: '0.72rem', color: '#64748b', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', borderBottom: '1px solid #e2e8f0' }}>Completion Time</th>
+                                        <th style={{ padding: '12px 16px', textAlign: 'left', fontSize: '0.72rem', color: '#64748b', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', borderBottom: '1px solid #e2e8f0' }}>Consultation Status</th>
+                                        <th style={{ padding: '12px 16px', textAlign: 'left', fontSize: '0.72rem', color: '#64748b', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', borderBottom: '1px solid #e2e8f0' }}>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {completedAppointments.filter(a => {
+                                        const q = searchQuery.toLowerCase().trim();
+                                        if (!q) return true;
+                                        return (a.userId?.name || '').toLowerCase().includes(q) || (a.userId?.patientId || a.patientId || '').toLowerCase().includes(q);
+                                    }).length === 0 ? (
+                                            <tr><td colSpan="7" style={{ textAlign: 'center', color: '#888', padding: '30px' }}>No completed consultations found.</td></tr>
+                                        ) : (
+                                            completedAppointments.filter(a => {
+                                                const q = searchQuery.toLowerCase().trim();
+                                                if (!q) return true;
+                                                return (a.userId?.name || '').toLowerCase().includes(q) || (a.userId?.patientId || a.patientId || '').toLowerCase().includes(q);
+                                            }).map((a, idx) => {
+                                                const compDate = a.completedAt ? new Date(a.completedAt) : new Date(a.updatedAt);
+                                                const isCurrentlyAdmitted = admissions.some(adm => (adm.appointmentId?._id || adm.appointmentId) === a._id && (adm.status === 'Admitted' || adm.status === 'Pending Allocation'));
+                                                return (
+                                                    <tr key={a._id || idx}
+                                                        style={{ borderBottom: '1px solid #f1f5f9', transition: 'background 0.15s' }}
+                                                        onMouseEnter={e => e.currentTarget.style.background = '#f8fafc'}
+                                                        onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+                                                        <td style={{ padding: '12px 16px', fontWeight: 'bold', color: '#1e293b' }}>
+                                                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                                                <span>{a.userId?.name || 'Walk-in Patient'}</span>
+                                                                {a.recommendAdmission && !isCurrentlyAdmitted && (
+                                                                    <span style={{
+                                                                        background: '#fee2e2',
+                                                                        color: '#b91c1c',
+                                                                        fontSize: '10px',
+                                                                        fontWeight: 800,
+                                                                        padding: '2px 8px',
+                                                                        borderRadius: '12px',
+                                                                        border: '1px solid #fca5a5',
+                                                                        display: 'inline-flex',
+                                                                        alignItems: 'center',
+                                                                        gap: '3px',
+                                                                        animation: 'pulse 2s infinite'
+                                                                    }} title={`Recommended by Doctor. Notes: ${a.recommendAdmissionNotes || 'None'}`}>
+                                                                        🚨 Admit Recommended
+                                                                    </span>
+                                                                )}
+                                                                {isCurrentlyAdmitted && (
+                                                                    <span style={{
+                                                                        background: '#e0f2fe',
+                                                                        color: '#0369a1',
+                                                                        fontSize: '10px',
+                                                                        fontWeight: 800,
+                                                                        padding: '2px 8px',
+                                                                        borderRadius: '12px',
+                                                                        border: '1px solid #bae6fd',
+                                                                        display: 'inline-flex',
+                                                                        alignItems: 'center',
+                                                                        gap: '3px'
+                                                                    }}>
+                                                                        🏥 Admitted
+                                                                    </span>
+                                                                )}
+                                                            </div>
+                                                        </td>
+                                                        <td style={{ padding: '12px 16px' }}>
+                                                            {a.userId?.patientId || a.patientId || 'N/A'}
+                                                        </td>
+                                                        <td style={{ padding: '12px 16px', color: '#0d9488', fontWeight: 600 }}>
+                                                            Dr. {a.doctorName || 'General'}
+                                                        </td>
+                                                        <td style={{ padding: '12px 16px' }}>
+                                                            {compDate.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}
+                                                        </td>
+                                                        <td style={{ padding: '12px 16px' }}>
+                                                            {compDate.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}
+                                                        </td>
+                                                        <td style={{ padding: '12px 16px' }}>
+                                                            <span style={{ padding: '4px 10px', borderRadius: '20px', fontSize: '0.75rem', fontWeight: 'bold', background: '#dbeafe', color: '#1e40af' }}>
+                                                                {a.status || 'completed'}
+                                                            </span>
+                                                        </td>
+                                                        <td style={{ padding: '12px 16px' }}>
+                                                            <div style={{ display: 'flex', gap: '4px' }}>
+                                                                {a.requestReportFollowUp && !a.followUpScheduled && (
+                                                                    <button onClick={() => handleScheduleFollowUp(a)}
+                                                                        style={{ padding: '5px 10px', fontSize: '0.72rem', background: '#8b5cf6', color: '#fff', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 600 }}>
+                                                                        📅 Schedule Follow-up
+                                                                    </button>
+                                                                )}
+                                                                {a.recommendAdmission && !isCurrentlyAdmitted && (
+                                                                    <button onClick={() => openHospitalizeModal(a)}
+                                                                        style={{ padding: '5px 10px', fontSize: '0.72rem', background: '#dbeafe', color: '#1d4ed8', border: '1px solid #93c5fd', borderRadius: '6px', cursor: 'pointer', fontWeight: 600 }}>
+                                                                        🏥 Admit
+                                                                    </button>
+                                                                )}
+                                                            </div>
+                                                        </td>
+                                                    </tr>
+                                                );
+                                            })
+                                        )}
+                                </tbody>
+                                </table>
+                            </>
+                        ) : (
+                            <table className="reception-table" style={{ width: '100%', borderCollapse: 'collapse' }}>
+                                <thead>
+                                    <tr style={{ background: '#f8fafc' }}>
+                                        <th style={{ padding: '12px 16px', textAlign: 'left', fontSize: '0.72rem', color: '#64748b', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', borderBottom: '1px solid #e2e8f0' }}>#</th>
+                                        <th style={{ padding: '12px 16px', textAlign: 'left', fontSize: '0.72rem', color: '#64748b', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', borderBottom: '1px solid #e2e8f0' }}>Patient</th>
+                                        <th style={{ padding: '12px 16px', textAlign: 'left', fontSize: '0.72rem', color: '#64748b', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', borderBottom: '1px solid #e2e8f0' }}>Doctor</th>
+                                        <th style={{ padding: '12px 16px', textAlign: 'left', fontSize: '0.72rem', color: '#64748b', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', borderBottom: '1px solid #e2e8f0' }}>{hospitalContext?.appointmentMode === 'token' ? 'Token' : 'Time'}</th>
+                                        <th style={{ padding: '12px 16px', textAlign: 'left', fontSize: '0.72rem', color: '#64748b', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', borderBottom: '1px solid #e2e8f0' }}>Payment</th>
+                                        <th style={{ padding: '12px 16px', textAlign: 'left', fontSize: '0.72rem', color: '#64748b', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', borderBottom: '1px solid #e2e8f0' }}>Status</th>
+                                        <th style={{ padding: '12px 16px', textAlign: 'left', fontSize: '0.72rem', color: '#64748b', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', borderBottom: '1px solid #e2e8f0' }}>Actions</th>
+                                    </tr>
+                                </thead>
+                            <tbody>
+                                {filteredAppointments.length === 0 ? (
+                                    <tr>
+                                        <td colSpan="7" style={{ textAlign: 'center', padding: '40px 20px', color: '#94a3b8' }}>
+                                            <div style={{ fontSize: '2rem', marginBottom: '8px' }}>{statusFilter === 'all' ? '📭' : '🔍'}</div>
+                                            <div style={{ fontWeight: 600, fontSize: '0.95rem' }}>
+                                                {statusFilter === 'all' ? 'No appointments today' : statusFilter === 'report_follow_up' ? 'No report follow-ups pending' : `No ${statusFilter} appointments`}
+                                            </div>
+                                            <div style={{ fontSize: '0.82rem', marginTop: '4px' }}>
+                                                {statusFilter === 'all' ? 'New registrations will appear here.' : 'No appointments match this status filter.'}
+                                            </div>
+                                        </td>
+                                    </tr>
+                                ) : (
+                                    filteredAppointments.map((apt, idx) => {
+                                        const payStatus = (apt.paymentStatus || '').toLowerCase();
+                                        const isCurrentlyAdmitted = admissions.some(adm => (adm.appointmentId?._id || adm.appointmentId) === apt._id && (adm.status === 'Admitted' || adm.status === 'Pending Allocation'));
+                                        return (
+                                            <tr key={apt._id}
+                                                style={{ borderBottom: '1px solid #f1f5f9', transition: 'background 0.15s' }}
+                                                onMouseEnter={e => e.currentTarget.style.background = '#f8fafc'}
+                                                onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+                                                <td style={{ padding: '12px 16px', color: '#94a3b8', fontWeight: 600, fontSize: '0.82rem' }}>{idx + 1}</td>
+                                                <td style={{ padding: '12px 16px' }}>
+                                                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                                        <div style={{ fontWeight: 700, fontSize: '0.88rem', color: '#1e293b' }}>{apt.userId?.name || apt.patientName || 'Walk-in'}</div>
+                                                        {apt.recommendAdmission && !isCurrentlyAdmitted && (
+                                                            <span style={{
+                                                                background: '#fee2e2',
+                                                                color: '#b91c1c',
+                                                                fontSize: '10px',
+                                                                fontWeight: 800,
+                                                                padding: '2px 8px',
+                                                                borderRadius: '12px',
+                                                                border: '1px solid #fca5a5',
+                                                                display: 'inline-flex',
+                                                                alignItems: 'center',
+                                                                gap: '3px',
+                                                                animation: 'pulse 2s infinite'
+                                                            }} title={`Recommended by Doctor. Notes: ${apt.recommendAdmissionNotes || 'None'}`}>
+                                                                🚨 Admit Recommended
+                                                            </span>
+                                                        )}
+                                                        {isCurrentlyAdmitted && (
+                                                            <span style={{
+                                                                background: '#e0f2fe',
+                                                                color: '#0369a1',
+                                                                fontSize: '10px',
+                                                                fontWeight: 800,
+                                                                padding: '2px 8px',
+                                                                borderRadius: '12px',
+                                                                border: '1px solid #bae6fd',
+                                                                display: 'inline-flex',
+                                                                alignItems: 'center',
+                                                                gap: '3px'
+                                                            }}>
+                                                                🏥 Admitted
+                                                            </span>
+                                                        )}
+                                                    </div>
+                                                    <div style={{ fontSize: '0.75rem', color: '#94a3b8' }}>📱 {apt.userId?.phone || apt.patientPhone || '-'} {apt.userId?.patientId || apt.patientId ? `| ${apt.userId?.patientId || apt.patientId}` : ''}</div>
+                                                </td>
+                                                <td style={{ padding: '12px 16px', fontSize: '0.85rem', color: '#475569', fontWeight: 500 }}>
+                                                    <span style={{ color: '#0d9488', fontWeight: 600 }}>Dr.</span> {apt.doctorName || 'N/A'}
+                                                    {apt.serviceName && <div style={{ fontSize: '0.72rem', color: '#94a3b8' }}>{apt.serviceName}</div>}
+                                                </td>
+                                                <td style={{ padding: '12px 16px', fontWeight: 700, fontSize: '0.9rem', color: '#1e293b' }}>
+                                                    {apt.tokenNumber != null
+                                                        ? <span style={{ color: '#d97706' }}>#{apt.tokenNumber}</span>
+                                                        : apt.appointmentTime?.startsWith('token-')
+                                                            ? <span style={{ color: '#d97706' }}>#{apt.appointmentTime.replace('token-', '')}</span>
+                                                            : apt.appointmentTime || '-'}
+                                                </td>
+                                                <td style={{ padding: '12px 16px' }}>
+                                                    <span style={{
+                                                        padding: '3px 10px', borderRadius: '6px', fontSize: '0.75rem', fontWeight: 700,
+                                                        background: payStatus === 'paid' ? '#dcfce7' : '#fef3c7',
+                                                        color: payStatus === 'paid' ? '#166534' : '#92400e'
+                                                    }}>
+                                                        {payStatus === 'paid' ? 'Paid' : apt.paymentStatus || 'Pending'}
+                                                        {apt.amount > 0 && ` • ₹${Number(apt.amount).toLocaleString('en-IN')}`}
+                                                    </span>
+                                                </td>
+                                                <td style={{ padding: '12px 16px' }}>
+                                                    <span style={{
+                                                        padding: '4px 12px', borderRadius: '20px', fontSize: '0.75rem', fontWeight: 700, textTransform: 'capitalize',
+                                                        background: apt.status === 'confirmed' ? '#dcfce7' : apt.status === 'completed' ? '#dbeafe' : apt.status === 'cancelled' ? '#fee2e2' : '#fef3c7',
+                                                        color: apt.status === 'confirmed' ? '#166534' : apt.status === 'completed' ? '#1e40af' : apt.status === 'cancelled' ? '#991b1b' : '#92400e'
+                                                    }}>{apt.status}</span>
+                                                </td>
+                                                <td style={{ padding: '12px 16px' }}>
+                                                    <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
+                                                        {statusFilter === 'report_follow_up' ? (
+                                                            <button onClick={() => handleScheduleFollowUp(apt)}
+                                                                style={{ padding: '5px 10px', fontSize: '0.72rem', background: '#8b5cf6', color: '#fff', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 600 }}>
+                                                                📅 Schedule Follow-up
+                                                            </button>
+                                                        ) : (
+                                                            <>
+                                                                {apt.requestReportFollowUp && !apt.followUpScheduled && (
+                                                                    <button onClick={() => handleScheduleFollowUp(apt)}
+                                                                        style={{ padding: '5px 10px', fontSize: '0.72rem', background: '#8b5cf6', color: '#fff', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 600 }}>
+                                                                        📅 Schedule Follow-up
+                                                                    </button>
+                                                                )}
+                                                                {apt.status === 'pending' && (apt.userId?._id || apt.userId) && (
+                                                                    <button onClick={() => handleCheckIn(apt)}
+                                                                        style={{ padding: '5px 10px', fontSize: '0.72rem', background: '#0d9488', color: '#fff', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 600 }}>
+                                                                        Check In
+                                                                    </button>
+                                                                )}
+                                                                {payStatus !== 'paid' && apt.status !== 'cancelled' && (
+                                                                    <button onClick={() => setPaymentModal({ open: true, appointment: apt, method: apt.paymentMethod || 'Cash' })}
+                                                                        style={{ padding: '5px 10px', fontSize: '0.72rem', background: '#dcfce7', color: '#166534', border: '1px solid #86efac', borderRadius: '6px', cursor: 'pointer', fontWeight: 600 }}>
+                                                                        💰 Pay
+                                                                    </button>
+                                                                )}
+                                                                {payStatus === 'paid' && (
+                                                                    <button onClick={() => generateReceiptPDF(apt)}
+                                                                        style={{ padding: '5px 10px', fontSize: '0.72rem', background: '#eff6ff', color: '#1d4ed8', border: '1px solid #93c5fd', borderRadius: '6px', cursor: 'pointer', fontWeight: 600 }}>
+                                                                        🧾 Receipt
+                                                                    </button>
+                                                                )}
+                                                                {((apt.status !== 'cancelled' && apt.status !== 'completed' && !isCurrentlyAdmitted) || (apt.recommendAdmission && !isCurrentlyAdmitted)) && (
+                                                                    <>
+                                                                        <button onClick={() => openHospitalizeModal(apt)}
+                                                                            style={{ padding: '5px 10px', fontSize: '0.72rem', background: '#dbeafe', color: '#1d4ed8', border: '1px solid #93c5fd', borderRadius: '6px', cursor: 'pointer', fontWeight: 600 }}>
+                                                                            🏥 Admit
+                                                                        </button>
+                                                                        {apt.status !== 'completed' && (
+                                                                            <button onClick={() => handleCancelAppointment(apt._id)}
+                                                                                style={{ padding: '5px 10px', fontSize: '0.72rem', background: '#fee2e2', color: '#dc2626', border: '1px solid #fca5a5', borderRadius: '6px', cursor: 'pointer', fontWeight: 600 }}>
+                                                                                ✕ Cancel
+                                                                            </button>
+                                                                        )}
+                                                                    </>
+                                                                )}
+                                                            </>
+                                                        )}
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        );
+                                    })
+                                )}
+                            </tbody>
+                            </table>
+                        )}
                     </div>
                 </div>
             </div>
-        )}
+
+            {/* Payment Confirmation Modal */}
+            {paymentModal.open && (
+                <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '16px' }}>
+                    <div style={{ background: '#fff', borderRadius: '14px', padding: '28px', width: '100%', maxWidth: '440px', boxShadow: '0 20px 60px rgba(0,0,0,0.2)' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
+                            <div>
+                                <h2 style={{ margin: 0, fontSize: '1.2rem', fontWeight: 700 }}>💰 Confirm Payment</h2>
+                                <p style={{ margin: '4px 0 0', color: '#64748b', fontSize: '0.88rem' }}>
+                                    {paymentModal.appointment?.userId?.name} — Rs. {Number(paymentModal.appointment?.amount || 0).toLocaleString('en-IN')}
+                                </p>
+                            </div>
+                            <button onClick={() => setPaymentModal({ open: false, appointment: null, method: 'Cash' })} style={{ background: 'none', border: 'none', fontSize: '1.4rem', cursor: 'pointer', color: '#94a3b8' }}>✕</button>
+                        </div>
+                        <div style={{ marginBottom: '18px' }}>
+                            <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, color: '#374151', marginBottom: '7px' }}>Payment Method</label>
+                            <select
+                                value={paymentModal.method}
+                                onChange={e => setPaymentModal(p => ({ ...p, method: e.target.value }))}
+                                style={{ width: '100%', padding: '10px 12px', border: '1.5px solid #e2e8f0', borderRadius: '8px', fontSize: '0.95rem' }}
+                            >
+                                <option value="Cash">Cash</option>
+                                <option value="UPI">UPI</option>
+                                <option value="Card">Card</option>
+                                <option value="Cheque">Cheque</option>
+                                <option value="NEFT/RTGS">NEFT / RTGS</option>
+                            </select>
+                        </div>
+                        <div style={{ display: 'flex', gap: '10px' }}>
+                            <button
+                                onClick={handleConfirmPayment}
+                                disabled={confirmingPayment}
+                                style={{ flex: 1, padding: '11px', background: '#16a34a', color: '#fff', border: 'none', borderRadius: '8px', fontWeight: 700, fontSize: '0.95rem', cursor: 'pointer' }}
+                            >
+                                {confirmingPayment ? 'Confirming...' : '✓ Confirm & Print Receipt'}
+                            </button>
+                            <button
+                                onClick={() => setPaymentModal({ open: false, appointment: null, method: 'Cash' })}
+                                style={{ padding: '11px 18px', background: '#f1f5f9', border: '1px solid #e2e8f0', borderRadius: '8px', cursor: 'pointer', fontWeight: '600', fontSize: '0.9rem' }}
+                            >
+                                Cancel
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Hospitalize Modal */}
+            {hospitalizeModal.open && (
+                <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '16px' }}>
+                    <div style={{ background: '#fff', borderRadius: '14px', padding: '28px', width: '100%', maxWidth: '580px', maxHeight: '90vh', overflowY: 'auto', boxShadow: '0 20px 60px rgba(0,0,0,0.2)' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
+                            <div>
+                                <h2 style={{ margin: 0, fontSize: '1.3rem', fontWeight: 700 }}>Hospitalize Patient</h2>
+                                <p style={{ margin: '4px 0 0', color: '#64748b', fontSize: '0.9rem' }}>
+                                    {hospitalizeModal.appointment?.userId?.name} — {hospitalizeModal.appointment?.doctorName}
+                                </p>
+                            </div>
+                            <button onClick={() => setHospitalizeModal({ open: false, appointment: null })} style={{ background: 'none', border: 'none', fontSize: '1.4rem', cursor: 'pointer', color: '#94a3b8' }}>✕</button>
+                        </div>
+
+                        {/* Bed & Ward */}
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px', marginBottom: '12px' }}>
+                            <div>
+                                <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, color: '#374151', marginBottom: '5px' }}>🏥 Ward / Room</label>
+                                <select
+                                    value={hospitalizeForm.ward}
+                                    onChange={e => {
+                                        const w = e.target.value;
+                                        const facMatch = hospitalContext?.facilities?.find(f => f.name.toLowerCase() === w.toLowerCase());
+                                        const defaultPrice = facMatch ? facMatch.pricePerDay : 0;
+                                        setHospitalizeForm(p => ({ ...p, ward: w, bedNumber: '', privateRoom: w === 'Private Room', dailyWardCharge: defaultPrice }));
+                                    }}
+                                    style={{ width: '100%', padding: '9px 12px', border: '1.5px solid #e2e8f0', borderRadius: '8px', fontSize: '0.95rem', boxSizing: 'border-box', background: '#fff', cursor: 'pointer' }}
+                                >
+                                    <option value="">— Select Ward —</option>
+                                    {Object.keys(WARD_BED_MAP).map(w => (
+                                        <option key={w} value={w}>{w}</option>
+                                    ))}
+                                </select>
+                            </div>
+                            <div>
+                                <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, color: '#374151', marginBottom: '5px' }}>🛏️ Bed Number</label>
+                                <select
+                                    value={hospitalizeForm.bedNumber}
+                                    onChange={e => setHospitalizeForm(p => ({ ...p, bedNumber: e.target.value }))}
+                                    disabled={!hospitalizeForm.ward}
+                                    style={{ width: '100%', padding: '9px 12px', border: '1.5px solid #e2e8f0', borderRadius: '8px', fontSize: '0.95rem', boxSizing: 'border-box', background: hospitalizeForm.ward ? '#fff' : '#f8fafc', cursor: hospitalizeForm.ward ? 'pointer' : 'not-allowed', color: hospitalizeForm.ward ? '#1e293b' : '#94a3b8' }}
+                                >
+                                    <option value="">{hospitalizeForm.ward ? '— Select Bed —' : '— Select Ward First —'}</option>
+                                    {(WARD_BED_MAP[hospitalizeForm.ward] || []).map(b => (
+                                        <option key={b} value={b}>{b}</option>
+                                    ))}
+                                </select>
+                            </div>
+                        </div>
+
+                        {/* Private Room Checkbox */}
+                        <div style={{ marginBottom: '16px', padding: '12px 16px', background: hospitalizeForm.privateRoom ? 'linear-gradient(135deg, #eff6ff, #f0fdf4)' : '#f8fafc', borderRadius: '10px', border: `1.5px solid ${hospitalizeForm.privateRoom ? '#3b82f6' : '#e2e8f0'}`, transition: 'all 0.2s ease' }}>
+                            <label style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer', userSelect: 'none' }}>
+                                <input
+                                    type="checkbox"
+                                    checked={hospitalizeForm.privateRoom}
+                                    onChange={e => setHospitalizeForm(p => ({
+                                        ...p,
+                                        privateRoom: e.target.checked,
+                                        ward: e.target.checked ? 'Private Room' : (p.ward === 'Private Room' ? '' : p.ward),
+                                        bedNumber: e.target.checked ? '' : (p.ward === 'Private Room' ? '' : p.bedNumber)
+                                    }))}
+                                    style={{ width: '18px', height: '18px', accentColor: '#3b82f6', cursor: 'pointer', flexShrink: 0 }}
+                                />
+                                <div>
+                                    <div style={{ fontWeight: 700, fontSize: '0.9rem', color: hospitalizeForm.privateRoom ? '#1d4ed8' : '#374151' }}>🏨 Private / Personal Room</div>
+                                    <div style={{ fontSize: '0.78rem', color: '#64748b', marginTop: '2px' }}>Patient will be allocated an exclusive private room with premium amenities</div>
+                                </div>
+                                {hospitalizeForm.privateRoom && (
+                                    <span style={{ marginLeft: 'auto', padding: '3px 10px', background: '#dbeafe', color: '#1d4ed8', borderRadius: '20px', fontSize: '0.75rem', fontWeight: 700, whiteSpace: 'nowrap' }}>✓ Selected</span>
+                                )}
+                            </label>
+                        </div>
+
+                        <div style={{ marginBottom: '16px' }}>
+                            <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, color: '#374151', marginBottom: '5px' }}>Admission Date</label>
+                            <input
+                                type="date"
+                                value={hospitalizeForm.admissionDate}
+                                onChange={e => setHospitalizeForm(p => ({ ...p, admissionDate: e.target.value }))}
+                                style={{ padding: '9px 12px', border: '1.5px solid #e2e8f0', borderRadius: '8px', fontSize: '0.95rem' }}
+                            />
+                        </div>
+
+                        {/* Facilities */}
+                        {(hospitalContext?.facilities?.length > 0) ? (
+                            <div style={{ marginBottom: '16px' }}>
+                                <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, color: '#374151', marginBottom: '10px' }}>
+                                    Select Facilities &amp; Days
+                                </label>
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                                    {hospitalContext.facilities.map(f => (
+                                        <div key={f.name} style={{ display: 'flex', alignItems: 'center', gap: '12px', padding: '10px 14px', background: '#f8fafc', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
+                                            <div style={{ flex: 1 }}>
+                                                <div style={{ fontWeight: 600, fontSize: '0.9rem' }}>{f.name}</div>
+                                                <div style={{ fontSize: '0.8rem', color: '#64748b' }}>₹{f.pricePerDay}/day</div>
+                                            </div>
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                                <label style={{ fontSize: '0.82rem', color: '#475569' }}>Days:</label>
+                                                <input
+                                                    type="number"
+                                                    min="0"
+                                                    placeholder="0"
+                                                    value={hospitalizeForm.facilityDays[f.name] || ''}
+                                                    onChange={e => setHospitalizeForm(p => ({ ...p, facilityDays: { ...p.facilityDays, [f.name]: e.target.value } }))}
+                                                    style={{ width: '70px', padding: '6px 10px', border: '1.5px solid #e2e8f0', borderRadius: '7px', fontSize: '0.9rem', textAlign: 'center' }}
+                                                />
+                                            </div>
+                                            {hospitalizeForm.facilityDays[f.name] > 0 && (
+                                                <div style={{ fontWeight: 700, color: '#1d4ed8', fontSize: '0.9rem', minWidth: '70px', textAlign: 'right' }}>
+                                                    ₹{(f.pricePerDay * Number(hospitalizeForm.facilityDays[f.name])).toLocaleString('en-IN')}
+                                                </div>
+                                            )}
+                                        </div>
+                                    ))}
+                                </div>
+                                {/* Total */}
+                                {Object.values(hospitalizeForm.facilityDays).some(d => d > 0) && (
+                                    <div style={{ marginTop: '12px', padding: '10px 14px', background: '#eff6ff', borderRadius: '8px', display: 'flex', justifyContent: 'space-between', fontWeight: 700 }}>
+                                        <span>Total Facility Cost:</span>
+                                        <span style={{ color: '#1d4ed8' }}>
+                                            ₹{(hospitalContext.facilities.reduce((sum, f) => sum + (f.pricePerDay * (Number(hospitalizeForm.facilityDays[f.name]) || 0)), 0)).toLocaleString('en-IN')}
+                                        </span>
+                                    </div>
+                                )}
+                            </div>
+                        ) : (
+                            <div style={{ padding: '12px 14px', background: '#fef9c3', borderRadius: '8px', fontSize: '0.88rem', color: '#92400e', marginBottom: '16px' }}>
+                                No facilities configured. Hospital admin can add facilities from the Hospital Admin Dashboard.
+                            </div>
+                        )}
+
+                        <div style={{ marginBottom: '20px' }}>
+                            <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, color: '#374151', marginBottom: '5px' }}>Notes (optional)</label>
+                            <textarea
+                                placeholder="Any notes for admission..."
+                                value={hospitalizeForm.notes}
+                                onChange={e => setHospitalizeForm(p => ({ ...p, notes: e.target.value }))}
+                                rows={2}
+                                style={{ width: '100%', padding: '9px 12px', border: '1.5px solid #e2e8f0', borderRadius: '8px', fontSize: '0.9rem', resize: 'vertical', boxSizing: 'border-box' }}
+                            />
+                        </div>
+
+                        <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
+                            <button onClick={() => setHospitalizeModal({ open: false, appointment: null })} style={{ padding: '10px 20px', background: '#f1f5f9', border: '1px solid #cbd5e1', borderRadius: '8px', cursor: 'pointer', fontWeight: 600, color: '#475569' }}>
+                                Cancel
+                            </button>
+                            <button
+                                onClick={handleHospitalize}
+                                disabled={hospitalizingSaving}
+                                style={{ padding: '10px 24px', background: '#1d4ed8', color: '#fff', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: 700, fontSize: '0.95rem', opacity: hospitalizingSaving ? 0.6 : 1 }}
+                            >
+                                {hospitalizingSaving ? 'Admitting...' : 'Admit Patient'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Reschedule Modal */}
+            {rescheduleModal.open && rescheduleModal.appointment && (
+                <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '16px' }}>
+                    <div style={{ background: '#fff', borderRadius: '14px', padding: '28px', width: '100%', maxWidth: '480px', boxShadow: '0 20px 60px rgba(0,0,0,0.2)' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
+                            <div>
+                                <h2 style={{ margin: 0, fontSize: '1.25rem', fontWeight: 700, color: '#1e293b' }}>📅 Reschedule Appointment</h2>
+                                <p style={{ margin: '4px 0 0', color: '#64748b', fontSize: '0.88rem' }}>
+                                    {rescheduleModal.appointment.userId?.name} — Dr. {rescheduleModal.appointment.doctorName}
+                                </p>
+                            </div>
+                            <button onClick={() => setRescheduleModal({ open: false, appointment: null })} style={{ background: 'none', border: 'none', fontSize: '1.4rem', cursor: 'pointer', color: '#94a3b8' }}>✕</button>
+                        </div>
+
+                        <form onSubmit={submitReschedule}>
+                            <div style={{ marginBottom: '18px' }}>
+                                <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, color: '#374151', marginBottom: '7px' }}>New Appointment Date</label>
+                                <input
+                                    type="date"
+                                    required
+                                    value={rescheduleForm.date}
+                                    onChange={e => setRescheduleForm({ ...rescheduleForm, date: e.target.value, time: '' })}
+                                    min={new Date().toISOString().split('T')[0]}
+                                    style={{ width: '100%', padding: '10px 12px', border: '1.5px solid #e2e8f0', borderRadius: '8px', fontSize: '0.95rem', boxSizing: 'border-box' }}
+                                />
+                            </div>
+
+                            <div style={{ marginBottom: '20px' }}>
+                                <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, color: '#374151', marginBottom: '8px' }}>Select Available Slot</label>
+                                {rescheduleForm.date ? (
+                                    rescheduleAvailableTimes.length > 0 ? (
+                                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(80px, 1fr))', gap: '8px' }}>
+                                            {rescheduleAvailableTimes.map(slot => {
+                                                const isSelected = rescheduleForm.time === slot;
+                                                return (
+                                                    <button
+                                                        key={slot}
+                                                        type="button"
+                                                        onClick={() => setRescheduleForm({ ...rescheduleForm, time: slot })}
+                                                        style={{
+                                                            padding: '10px 4px',
+                                                            fontSize: '0.85rem',
+                                                            fontWeight: 700,
+                                                            border: isSelected ? 'none' : '1px solid #e2e8f0',
+                                                            borderRadius: '6px',
+                                                            cursor: 'pointer',
+                                                            background: isSelected ? '#d97706' : '#fff',
+                                                            color: isSelected ? '#fff' : '#1e293b',
+                                                            transition: 'all 0.15s'
+                                                        }}
+                                                    >
+                                                        {slot}
+                                                    </button>
+                                                );
+                                            })}
+                                        </div>
+                                    ) : (
+                                        <p style={{ color: '#ef4444', fontSize: '0.88rem', margin: 0 }}>No slots available on this date.</p>
+                                    )
+                                ) : (
+                                    <p style={{ color: '#64748b', fontSize: '0.88rem', margin: 0, fontStyle: 'italic' }}>Please select a date first.</p>
+                                )}
+                            </div>
+
+                            <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end', marginTop: '24px' }}>
+                                <button
+                                    type="button"
+                                    onClick={() => setRescheduleModal({ open: false, appointment: null })}
+                                    style={{ padding: '10px 20px', background: '#f1f5f9', border: '1px solid #cbd5e1', borderRadius: '8px', cursor: 'pointer', fontWeight: 600, color: '#475569' }}
+                                >
+                                    Cancel
+                                </button>
+                                <button
+                                    type="submit"
+                                    disabled={!rescheduleForm.date || !rescheduleForm.time}
+                                    style={{ padding: '10px 24px', background: '#d97706', color: '#fff', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: 700, fontSize: '0.95rem', opacity: (!rescheduleForm.date || !rescheduleForm.time) ? 0.6 : 1 }}
+                                >
+                                    Confirm Reschedule
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            )}
         </>
     );
 };

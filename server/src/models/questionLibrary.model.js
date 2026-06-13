@@ -15,7 +15,8 @@ const questionLibrarySchema = new mongoose.Schema({
         default: null
     }
 }, {
-    timestamps: true
+    timestamps: true,
+    minimize: false
 });
 
 const QuestionLibrary = mongoose.model('QuestionLibrary', questionLibrarySchema);

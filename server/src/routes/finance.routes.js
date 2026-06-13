@@ -2,18 +2,16 @@ const express = require('express');
 const router = express.Router();
 const mongoose = require('mongoose');
 const { verifyToken } = require('../middleware/auth.middleware');
-
-const Appointment = require('../models/appointment.model');
-const LabReport = require('../models/labReport.model');
-const PharmacyOrder = require('../models/pharmacyOrder.model');
-const Inventory = require('../models/inventory.model');
+const { getTenantConnection } = require('../db/tenantDb');
+const { getTenantModels } = require('../db/tenantModels');
 
 // Middleware to check if user has access to finance data
 const verifyFinanceAccess = async (req, res, next) => {
     try {
         await verifyToken(req, res, () => {
-            const role = req.user.role ? req.user.role.toLowerCase() : '';
-            if (['accountant', 'centraladmin', 'superadmin', 'hospitaladmin'].includes(role)) {
+            const role = typeof req.user.role === 'string' ? req.user.role.toLowerCase() : (req.user._roleData?.name || '').toLowerCase();
+            const perms = req.user._roleData?.permissions || [];
+            if (['accountant', 'centraladmin', 'superadmin', 'hospitaladmin'].includes(role) || perms.includes('finance_view') || perms.includes('*')) {
                 return next();
             }
             return res.status(403).json({ success: false, message: 'Finance access required' });
@@ -30,7 +28,7 @@ router.get('/dashboard', verifyFinanceAccess, async (req, res) => {
 
         // Determine target hospital ID
         let targetHospitalId = hospitalId;
-        const role = req.user.role ? req.user.role.toLowerCase() : '';
+        const role = typeof req.user.role === 'string' ? req.user.role.toLowerCase() : (req.user._roleData?.name || '').toLowerCase();
 
         // If user is not superadmin/centraladmin, scope strictly to their hospital
         if (role !== 'superadmin' && role !== 'centraladmin') {
@@ -38,7 +36,6 @@ router.get('/dashboard', verifyFinanceAccess, async (req, res) => {
                 targetHospitalId = req.user.hospitalId.toString();
             } else {
                 // If they are not an admin and have NO hospitalId, they should see ZERO data
-                // They should NOT fall back to seeing global data.
                 return res.json({
                     success: true,
                     data: {
@@ -50,6 +47,37 @@ router.get('/dashboard', verifyFinanceAccess, async (req, res) => {
                 });
             }
         }
+
+        // Connect to tenant DB if targetHospitalId is provided
+        let tenantConnection = null;
+        if (targetHospitalId) {
+            try {
+                tenantConnection = await getTenantConnection(String(targetHospitalId));
+            } catch (err) {
+                console.error('[Finance] Tenant database connection failed:', err.message);
+            }
+        }
+
+        // Get appropriate models (tenant-bound or master fallback)
+        const getModels = (dbConn) => {
+            if (dbConn) {
+                const m = getTenantModels(dbConn);
+                return {
+                    Appointment: m.Appointment,
+                    LabReport: m.LabReport,
+                    PharmacyOrder: m.PharmacyOrder,
+                    Inventory: m.Inventory
+                };
+            }
+            return {
+                Appointment: require('../models/appointment.model'),
+                LabReport: require('../models/labReport.model'),
+                PharmacyOrder: require('../models/pharmacyOrder.model'),
+                Inventory: require('../models/inventory.model')
+            };
+        };
+
+        const { Appointment, LabReport, PharmacyOrder, Inventory } = getModels(tenantConnection);
 
         // Date filters
         let dateFilter = {};
@@ -66,7 +94,7 @@ router.get('/dashboard', verifyFinanceAccess, async (req, res) => {
             if (endDate) appointmentDateFilter.appointmentDate.$lte = new Date(endDate);
         }
 
-        // HARD ISOLATION: Direct hospitalId filter — no doctor lookup needed
+        // Filter by hospital ID (if using master database, or as redundancy)
         let hospitalFilter = {};
         if (targetHospitalId) {
             hospitalFilter = { hospitalId: targetHospitalId };
@@ -98,17 +126,17 @@ router.get('/dashboard', verifyFinanceAccess, async (req, res) => {
         let totalMedicineRevenue = 0;
         let totalMedicineCost = 0;
 
-        // Aggregate totals stored in order if any, or fall back to calculating via inventory mapping
         for (const order of pharmacyOrders) {
             if (order.totalAmount > 0 || order.totalCost > 0) {
                 totalMedicineRevenue += order.totalAmount || 0;
                 totalMedicineCost += order.totalCost || 0;
             } else {
-                // If the order has items but no saved amount/cost, estimate it now using Inventory
                 for (const item of order.items) {
-                    const invItem = await Inventory.findOne({ name: new RegExp('^' + item.medicineName + '$', 'i') });
+                    const invItemQuery = { name: new RegExp('^' + item.medicineName + '$', 'i') };
+                    if (targetHospitalId) invItemQuery.hospitalId = targetHospitalId;
+                    const invItem = await Inventory.findOne(invItemQuery);
                     if (invItem) {
-                        const qty = 1; // Simplistic approximation if quantity isn't cleanly stored
+                        const qty = 1;
                         totalMedicineRevenue += (invItem.sellingPrice || 0) * qty;
                         totalMedicineCost += (invItem.buyingPrice || 0) * qty;
                     }

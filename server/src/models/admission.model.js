@@ -12,6 +12,8 @@ const admissionSchema = new mongoose.Schema({
     status: { type: String, enum: ['Admitted', 'Discharged', 'Pending Allocation'], default: 'Pending Allocation' },
     ward: String,
     bedNumber: String,
+    dailyWardCharge: { type: Number, default: 0 },
+    privateRoom: { type: Boolean, default: false },
     requestedDepartment: { type: String, default: '' },
     priority: { type: String, enum: ['Normal', 'Urgent', 'Critical'], default: 'Normal' },
     selectedFacilities: [{

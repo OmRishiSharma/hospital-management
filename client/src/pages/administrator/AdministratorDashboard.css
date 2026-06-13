@@ -498,6 +498,28 @@
     box-shadow: inset 0 0 6px rgba(59, 130, 246, 0.15);
 }
 
+.bed-slot.private-slot {
+    border-color: #c4b5fd;
+    border-width: 3px;
+    background: #faf5ff;
+    box-shadow: inset 0 0 6px rgba(139, 92, 246, 0.15);
+}
+
+.bed-slot.private-slot .bed-ward {
+    color: #7c3aed;
+}
+
+.bed-slot.private-slot.Available {
+    border-color: #c4b5fd;
+    background: #faf5ff;
+}
+
+.bed-slot.private-slot.Occupied {
+    border-color: #a78bfa;
+    background: #f5f3ff;
+}
+
+
 .bed-num {
     font-size: 13px;
     font-weight: 800;

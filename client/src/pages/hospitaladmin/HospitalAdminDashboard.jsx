@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useAppDispatch } from '../../store/hooks';
 import { updateUser as updateUserAction } from '../../store/slices/authSlice';
 import { adminAPI, uploadAPI, hospitalAPI } from '../../utils/api';
+import UserPermissionManager from '../centraladmin/UserPermissionManager';
 import '../administration/SuperAdmin.css';
 import './HospitalAdminDashboard.css';
 
@@ -418,6 +419,7 @@ const HospitalAdminDashboard = () => {
     const tabs = [
         { id: 'overview', label: '📊 Overview' },
         { id: 'staff', label: '👤 Staff' },
+        { id: 'permissions', label: '🔐 Permissions' },
         { id: 'departments', label: '🏢 Departments' },
         { id: 'facilities', label: '🛏️ Facilities' },
         { id: 'inventory', label: '💊 Inventory' },
@@ -556,6 +558,30 @@ const HospitalAdminDashboard = () => {
                                         </div>
                                     </div>
                                 ))}
+                                {/* Dynamic Permissions — tab switch */}
+                                <div
+                                    className="ha-op-card"
+                                    onClick={() => setActiveTab('permissions')}
+                                    style={{ background: '#ede9fe', borderColor: '#7c3aed30' }}
+                                >
+                                    <span className="ha-op-icon" style={{ color: '#7c3aed' }}>🔐</span>
+                                    <div>
+                                        <h4 style={{ color: '#7c3aed' }}>Roles &amp; Permissions</h4>
+                                        <p>Create custom roles and assign granular permissions per staff member</p>
+                                    </div>
+                                </div>
+                                {/* Create Staff Account — tab switch */}
+                                <div
+                                    className="ha-op-card"
+                                    onClick={() => { setActiveTab('staff'); setShowCreateForm(true); }}
+                                    style={{ background: '#f0fdfa', borderColor: '#0d948830' }}
+                                >
+                                    <span className="ha-op-icon" style={{ color: '#0d9488' }}>👤</span>
+                                    <div>
+                                        <h4 style={{ color: '#0d9488' }}>Create Staff Account</h4>
+                                        <p>Add a new staff member with login credentials</p>
+                                    </div>
+                                </div>
                             </div>
                         </div>
 
@@ -770,7 +796,14 @@ const HospitalAdminDashboard = () => {
                     </div>
                 )}
 
-                {/* ===================== DEPARTMENTS TAB ===================== */}
+                {/* ===================== PERMISSIONS TAB ===================== */}
+                {activeTab === 'permissions' && (
+                    <div className="admin-card" style={{ padding: '0', overflow: 'hidden', background: 'transparent', boxShadow: 'none', border: 'none' }}>
+                        <UserPermissionManager hospitals={hospitalInfo ? [{ _id: String(hospitalInfo._id), name: hospitalInfo.name }] : []} />
+                    </div>
+                )}
+
+
                 {activeTab === 'departments' && (
                     <div className="admin-card">
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>

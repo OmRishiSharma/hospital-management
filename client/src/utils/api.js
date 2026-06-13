@@ -49,6 +49,18 @@ export const authAPI = {
         const response = await apiClient.post('/api/auth/signup', { name, email, password, phone });
         return response.data;
     },
+    getProfile: async () => {
+        const response = await apiClient.get('/api/auth/me');
+        return response.data;
+    },
+    updateProfile: async (profileData) => {
+        const response = await apiClient.put('/api/auth/profile', profileData);
+        return response.data;
+    },
+    changePassword: async (currentPassword, newPassword) => {
+        const response = await apiClient.put('/api/auth/change-password', { currentPassword, newPassword });
+        return response.data;
+    },
 };
 
 const getRajeshSeedData = () => {
@@ -692,18 +704,33 @@ export const doctorAPI = {
 };
 
 export const receptionAPI = {
-    getAllAppointments: async (date, future, all) => {
+    getAllAppointments: async (date, future, all, tomorrow, reportFollowUp) => {
         let url = '/api/reception/appointments';
         const params = [];
         if (date) params.push(`date=${encodeURIComponent(date)}`);
         if (future) params.push(`future=true`);
         if (all) params.push(`all=true`);
+        if (tomorrow) params.push(`tomorrow=true`);
+        if (reportFollowUp) params.push(`reportFollowUp=true`);
         if (params.length > 0) url += `?${params.join('&')}`;
         const response = await apiClient.get(url);
         return response.data;
     },
     registerPatient: async (data) => {
         const response = await apiClient.post('/api/reception/register', data);
+        return response.data;
+    },
+    uploadPastReport: async (patientId, file, name) => {
+        const formData = new FormData();
+        formData.append('report', file);
+        if (name) formData.append('name', name);
+        const response = await apiClient.post(`/api/reception/patients/${patientId}/reports`, formData, {
+            headers: { 'Content-Type': 'multipart/form-data' }
+        });
+        return response.data;
+    },
+    deletePastReport: async (patientId, reportId) => {
+        const response = await apiClient.delete(`/api/reception/patients/${patientId}/reports/${reportId}`);
         return response.data;
     },
     getTransactions: async () => {
@@ -770,7 +797,7 @@ export const adminAPI = {
     getAdministrators: async () => (await apiClient.get('/api/admin/administrators')).data,
     createAdministrator: async (data) => (await apiClient.post('/api/admin/administrators', data)).data,
     updateAdministrator: async (id, data) => (await apiClient.put(`/api/admin/administrators/${id}`, data)).data,
-    updateUserPermissions: async (id, customPermissions) => (await apiClient.put(`/api/admin/users/${id}/permissions`, { customPermissions })).data,
+    updateUserPermissions: async (id, customPermissions, deniedPermissions) => (await apiClient.put(`/api/admin/users/${id}/permissions`, { customPermissions, deniedPermissions })).data,
 };
 
 export const administratorAPI = {
@@ -871,9 +898,9 @@ export const pharmacyAPI = {
 
 export const pharmacyOrderAPI = {
     getOrders: async () => (await apiClient.get('/api/pharmacy/orders')).data,
-    completeOrder: async (id, purchasedIndices = null) => (await apiClient.patch(`/api/pharmacy/orders/${id}/complete`, { purchasedIndices })).data,
+    completeOrder: async (id, purchasedIndices = null, itemQuantities = null) => (await apiClient.patch(`/api/pharmacy/orders/${id}/complete`, { purchasedIndices, itemQuantities })).data,
     cancelOrder: async (id) => (await apiClient.patch(`/api/pharmacy/orders/${id}/cancel`)).data,
-    markPaid: async (id) => (await apiClient.patch(`/api/pharmacy/orders/${id}/mark-paid`)).data
+    markPaid: async (id, purchasedIndices = null, itemQuantities = null) => (await apiClient.patch(`/api/pharmacy/orders/${id}/mark-paid`, { purchasedIndices, itemQuantities })).data
 };
 
 export const clinicalAPI = {

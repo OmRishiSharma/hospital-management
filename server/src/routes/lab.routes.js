@@ -1,12 +1,29 @@
 const express = require('express');
 const router = express.Router();
 const multer = require('multer');
-const LabReport = require('../models/labReport.model');
-const Appointment = require('../models/appointment.model');
+const { resolveTenant } = require('../middleware/tenantMiddleware');
+const { getTenantModels } = require('../db/tenantModels');
 const Lab = require('../models/lab.model');
+const Doctor = require('../models/doctor.model');
 const { verifyToken } = require('../middleware/auth.middleware');
 const imagekit = require('../utils/imagekit');
 const validateFileType = require('../utils/validateFileType');
+
+const getModels = (req) => {
+    if (req.tenantDb) {
+        const m = getTenantModels(req.tenantDb);
+        return {
+            LabReport: m.LabReport,
+            Appointment: m.Appointment,
+            User: m.User
+        };
+    }
+    return {
+        LabReport: require('../models/labReport.model'),
+        Appointment: require('../models/appointment.model'),
+        User: require('../models/user.model')
+    };
+};
 
 const ALLOWED_MIMES = ['image/jpeg', 'image/png', 'application/pdf'];
 const upload = multer({
@@ -27,15 +44,20 @@ const verifyLab = async (req, res, next) => {
         !roleName.includes('admin') && 
         !roleName.includes('accountant') &&
         !permissions.includes('administrator_view') &&
-        !permissions.includes('administrator_manage')) {
+        !permissions.includes('administrator_manage') &&
+        !permissions.includes('lab_view') &&
+        !permissions.includes('lab_manage') &&
+        !permissions.includes('lab_reports_view') &&
+        !permissions.includes('*')) {
         return res.status(403).json({ message: 'Access denied. Lab personnel only.' });
     }
     next();
 };
 
 // 1. GET LAB DASHBOARD STATS
-router.get('/stats', verifyToken, verifyLab, async (req, res) => {
+router.get('/stats', verifyToken, resolveTenant, verifyLab, async (req, res) => {
     try {
+        const { LabReport } = getModels(req);
         const hid = req.user.hospitalId;
         const hospitalFilter = hid ? { hospitalId: hid } : {};
 
@@ -140,8 +162,9 @@ router.get('/stats', verifyToken, verifyLab, async (req, res) => {
 });
 
 // 2. GET ASSIGNED REQUESTS (Pending or All)
-router.get('/requests', verifyToken, verifyLab, async (req, res) => {
+router.get('/requests', verifyToken, resolveTenant, verifyLab, async (req, res) => {
     try {
+        const { LabReport, User } = getModels(req);
         const { status, search } = req.query;
         const hid = req.user.hospitalId;
         const hospitalFilter = hid ? { hospitalId: hid } : {};
@@ -178,7 +201,6 @@ router.get('/requests', verifyToken, verifyLab, async (req, res) => {
         // Add search query criteria
         if (search && search.trim()) {
             const mongoose = require('mongoose');
-            const User = require('../models/user.model');
             const safeSearch = search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
             // Find patient users matching name or patientId
@@ -207,7 +229,7 @@ router.get('/requests', verifyToken, verifyLab, async (req, res) => {
 
         const requests = await LabReport.find(query)
             .populate('userId', 'name email phone patientId')
-            .populate('doctorId', 'name')
+            .populate({ path: 'doctorId', model: Doctor, select: 'name' })
             .sort({ createdAt: -1 });
 
         // Map legacy report status values dynamically for backward compatibility
@@ -237,8 +259,9 @@ router.get('/requests', verifyToken, verifyLab, async (req, res) => {
 });
 
 // 3. UPLOAD TEST REPORT
-router.post('/upload-report/:reportId', verifyToken, verifyLab, upload.single('reportFile'), async (req, res) => {
+router.post('/upload-report/:reportId', verifyToken, resolveTenant, verifyLab, upload.single('reportFile'), async (req, res) => {
     try {
+        const { LabReport, Appointment } = getModels(req);
         const { reportId } = req.params;
         const { notes } = req.body;
 
@@ -332,8 +355,9 @@ router.post('/upload-report/:reportId', verifyToken, verifyLab, upload.single('r
 });
 
 // 4. CREATE A NEW LAB TEST MANUALLY (Walk-in/Manual report creation)
-router.post('/create', verifyToken, verifyLab, upload.single('reportFile'), async (req, res) => {
+router.post('/create', verifyToken, resolveTenant, verifyLab, upload.single('reportFile'), async (req, res) => {
     try {
+        const { LabReport, User } = getModels(req);
         const { patientId, testNames, amount, notes, paymentStatus, paymentMode, doctorId } = req.body;
 
         if (!patientId) {
@@ -343,7 +367,6 @@ router.post('/create', verifyToken, verifyLab, upload.single('reportFile'), asyn
             return res.status(400).json({ success: false, message: 'Test names are required.' });
         }
 
-        const User = require('../models/user.model');
         const searchTerm = patientId.trim();
         const patientUser = await User.findOne({
             $or: [
@@ -452,8 +475,9 @@ router.post('/create', verifyToken, verifyLab, upload.single('reportFile'), asyn
 });
 
 // Cancel a pending lab test report
-router.patch('/:id/cancel', verifyToken, verifyLab, async (req, res) => {
+router.patch('/:id/cancel', verifyToken, resolveTenant, verifyLab, async (req, res) => {
     try {
+        const { LabReport } = getModels(req);
         const report = await LabReport.findById(req.params.id);
         if (!report) return res.status(404).json({ success: false, message: 'Report not found' });
 
@@ -490,8 +514,9 @@ router.patch('/:id/cancel', verifyToken, verifyLab, async (req, res) => {
 });
 
 // 5. COLLECT SAMPLE FOR LAB ORDER
-router.post('/:id/collect-sample', verifyToken, verifyLab, async (req, res) => {
+router.post('/:id/collect-sample', verifyToken, resolveTenant, verifyLab, async (req, res) => {
     try {
+        const { LabReport } = getModels(req);
         const { id } = req.params;
         const { sampleType, collectionNotes, collectionTime } = req.body;
 
@@ -550,8 +575,9 @@ router.post('/:id/collect-sample', verifyToken, verifyLab, async (req, res) => {
 });
 
 // 6. UPDATE LIFECYCLE STATUS FOR LAB ORDER (e.g. In Testing, Completed)
-router.patch('/:id/status', verifyToken, verifyLab, async (req, res) => {
+router.patch('/:id/status', verifyToken, resolveTenant, verifyLab, async (req, res) => {
     try {
+        const { LabReport } = getModels(req);
         const { id } = req.params;
         const { status, notes } = req.body;
 

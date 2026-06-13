@@ -26,6 +26,11 @@ const appointmentSchema = new mongoose.Schema({
         default: null
     },
     patientId: { type: String, required: false, index: true },
+    patientName: { type: String, default: '' },
+    patientPhone: { type: String, default: '' },
+    patientEmail: { type: String, default: '' },
+    patientGender: { type: String, default: '' },
+    patientDob: { type: Date, default: null },
     hospitalId: { type: mongoose.Schema.Types.ObjectId, ref: 'Hospital', index: true },
 
     doctorId: {
@@ -91,7 +96,9 @@ const appointmentSchema = new mongoose.Schema({
     recommendAdmission: { type: Boolean, default: false },
     recommendAdmissionNotes: { type: String, default: '' },
     recommendAdmissionPriority: { type: String, enum: ['Normal', 'Urgent', 'Critical'], default: 'Normal' },
-    recommendAdmissionDept: { type: String, default: '' }
+    recommendAdmissionDept: { type: String, default: '' },
+    requestReportFollowUp: { type: Boolean, default: false },
+    followUpScheduled: { type: Boolean, default: false }
 }, {
     timestamps: true
 });

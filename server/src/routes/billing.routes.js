@@ -16,6 +16,7 @@ const MasterAdmission = require('../models/admission.model');
 const MasterInvoice = require('../models/invoice.model');
 const MasterRefund = require('../models/refund.model');
 const MasterBillingActivityLog = require('../models/billingActivityLog.model');
+const MasterLabTest = require('../models/labTest.model');
 
 // Billing Access Middleware
 const verifyBillingAccess = async (req, res, next) => {
@@ -42,7 +43,13 @@ const verifyBillingAccess = async (req, res, next) => {
 
 // Model scoping helper
 const getModels = (req) => {
-    if (req.tenantDb) return getTenantModels(req.tenantDb);
+    if (req.tenantDb) {
+        const tenantModels = getTenantModels(req.tenantDb);
+        return {
+            ...tenantModels,
+            LabTest: MasterLabTest, // Always use master LabTest schema
+        };
+    }
     return {
         User: MasterUser,
         Appointment: MasterAppointment,
@@ -53,6 +60,7 @@ const getModels = (req) => {
         Invoice: MasterInvoice,
         Refund: MasterRefund,
         BillingActivityLog: MasterBillingActivityLog,
+        LabTest: MasterLabTest,
     };
 };
 
@@ -60,7 +68,7 @@ const getModels = (req) => {
 router.get('/patient/:identifier', verifyBillingAccess, async (req, res) => {
     try {
         const { identifier } = req.params;
-        const { User, Appointment, LabReport, PharmacyOrder, FacilityCharge, Admission, Invoice } = getModels(req);
+        const { User, Appointment, LabReport, PharmacyOrder, FacilityCharge, Admission, Invoice, LabTest } = getModels(req);
 
         const hospitalFilter = req.user.hospitalId ? { hospitalId: req.user.hospitalId } : {};
         let patient = null;
@@ -110,17 +118,32 @@ router.get('/patient/:identifier', verifyBillingAccess, async (req, res) => {
         // Fetch billing items
         const [appointments, labReports, pharmacyOrders, facilityCharges, admissions, invoices] = await Promise.all([
             // OPD appointments (pre-paid during registration will be paymentStatus: 'Paid')
-            Appointment.find({ patientId: patient._id, ...hFilter }).sort({ appointmentDate: -1 }).lean(),
+            Appointment.find({
+                $or: [
+                    { userId: patient._id },
+                    { patientId: patient.patientId },
+                    { patientId: patient.mrn }
+                ].filter(Boolean),
+                ...hFilter
+            }).sort({ appointmentDate: -1 }).lean(),
             // Lab Reports (only if status is Sample Collected or verified, i.e., not raw 'Pending')
             LabReport.find({
-                patientId: patient._id,
+                $or: [
+                    { userId: patient._id },
+                    { patientId: patient.patientId },
+                    { patientId: patient.mrn }
+                ].filter(Boolean),
                 status: { $in: ['Sample Collected', 'In Testing', 'Report Ready', 'Completed'] },
                 paymentStatus: { $in: ['PENDING', 'Pending'] },
                 ...hFilter
             }).sort({ createdAt: -1 }).lean(),
             // Pharmacy orders (only if orderStatus is Completed, i.e., medicines are dispensed)
             PharmacyOrder.find({
-                patientId: patient._id,
+                $or: [
+                    { userId: patient._id },
+                    { patientId: patient.patientId },
+                    { patientId: patient.mrn }
+                ].filter(Boolean),
                 orderStatus: 'Completed',
                 paymentStatus: { $in: ['Pending', 'Unpaid'] },
                 ...hFilter
@@ -142,6 +165,108 @@ router.get('/patient/:identifier', verifyBillingAccess, async (req, res) => {
                 ...hFilter
             }).sort({ createdAt: -1 }).lean()
         ]);
+
+        // Heal and calculate pricing for lab reports dynamically
+        const allLabTests = await LabTest.find({}).lean();
+        const hospitalIdStr = req.user.hospitalId ? req.user.hospitalId.toString() : null;
+
+        // Map test name to its price for fast lookup
+        const testPriceMap = {};
+        allLabTests.forEach(t => {
+            const nameKey = t.name.trim().toLowerCase();
+            let effectivePrice = t.price;
+            if (hospitalIdStr && t.hospitalPrices) {
+                const hPrice = t.hospitalPrices[hospitalIdStr] || t.hospitalPrices.get?.(hospitalIdStr);
+                if (hPrice !== undefined && hPrice !== null) {
+                    effectivePrice = hPrice;
+                }
+            }
+            testPriceMap[nameKey] = effectivePrice;
+        });
+
+        // Helper to merge test names
+        const mergeTestNames = (names) => {
+            if (!Array.isArray(names)) return [];
+            const merged = [];
+            let temp = '';
+            let openCount = 0;
+
+            for (const name of names) {
+                if (!name) continue;
+                const trimmed = name.trim();
+                const openParen = (trimmed.match(/\(/g) || []).length;
+                const closeParen = (trimmed.match(/\)/g) || []).length;
+
+                if (temp) {
+                    temp += ', ' + trimmed;
+                } else {
+                    temp = trimmed;
+                }
+
+                openCount += openParen - closeParen;
+
+                if (openCount <= 0) {
+                    merged.push(temp);
+                    temp = '';
+                    openCount = 0;
+                }
+            }
+            if (temp) {
+                merged.push(temp);
+            }
+            return merged;
+        };
+
+        // Heal lab reports in place
+        for (let l of labReports) {
+            const originalTestNames = [...l.testNames];
+            const mergedNames = mergeTestNames(l.testNames);
+            
+            // Calculate dynamic price
+            let calculatedAmount = 0;
+            mergedNames.forEach(tName => {
+                const trimmedName = tName.trim().toLowerCase();
+                if (testPriceMap[trimmedName] !== undefined) {
+                    calculatedAmount += testPriceMap[trimmedName];
+                } else {
+                    // Fuzzy matching fallback
+                    const matchedTest = allLabTests.find(t => {
+                        const dbName = t.name.trim().toLowerCase();
+                        return dbName.includes(trimmedName) || trimmedName.includes(dbName);
+                    });
+                    if (matchedTest) {
+                        let price = matchedTest.price;
+                        if (hospitalIdStr && matchedTest.hospitalPrices) {
+                            const hPrice = matchedTest.hospitalPrices[hospitalIdStr] || matchedTest.hospitalPrices.get?.(hospitalIdStr);
+                            if (hPrice !== undefined && hPrice !== null) {
+                                price = hPrice;
+                            }
+                        }
+                        calculatedAmount += price;
+                    }
+                }
+            });
+
+            const needsHeal = (JSON.stringify(originalTestNames) !== JSON.stringify(mergedNames)) || (!l.amount || l.amount === 0);
+
+            // Dynamically assign for response
+            l.testNames = mergedNames;
+            if (!l.amount || l.amount === 0) {
+                l.amount = calculatedAmount;
+            }
+
+            if (needsHeal) {
+                try {
+                    // Update database copy so it's clean for good
+                    await LabReport.updateOne(
+                        { _id: l._id },
+                        { $set: { testNames: mergedNames, amount: l.amount } }
+                    );
+                } catch (dbErr) {
+                    console.error(`Failed to persist healed lab report ${l._id}:`, dbErr.message);
+                }
+            }
+        }
 
         res.json({
             success: true,
@@ -446,6 +571,33 @@ router.post('/refunds', verifyBillingAccess, async (req, res) => {
 
         await refund.save();
 
+        // Also save a copy to the Master DB (HSM) refunds collection for global database verification
+        try {
+            const masterRefund = new MasterRefund({
+                _id: refund._id, // Match the ID
+                hospitalId,
+                patientId,
+                patientName,
+                invoiceNumber: invoiceNumber || '',
+                refundType,
+                itemId: itemId || null,
+                amount: Number(amount),
+                reason,
+                status: 'Refund Pending',
+                requestedBy: req.user._id,
+                requestedByName: req.user.name || 'Staff',
+                history: [{
+                    status: 'Refund Pending',
+                    performedBy: req.user._id,
+                    performedByName: req.user.name || 'Staff',
+                    notes: 'Refund request created'
+                }]
+            });
+            await masterRefund.save();
+        } catch (masterErr) {
+            console.error('Failed to save refund copy to master DB:', masterErr.message);
+        }
+
         await new BillingActivityLog({
             hospitalId,
             performedBy: req.user._id,
@@ -469,6 +621,17 @@ router.put('/refunds/:id/approve', verifyBillingAccess, async (req, res) => {
         const { id } = req.params;
         const { notes } = req.body;
 
+        const userRole = String(req.user.role || '').toLowerCase();
+        const roleData = req.user._roleData;
+        const roleName = String(roleData?.name || '').toLowerCase();
+
+        if (
+            ['reception', 'receptionist'].includes(userRole) ||
+            ['reception', 'receptionist'].includes(roleName)
+        ) {
+            return res.status(403).json({ success: false, message: 'Forbidden: Receptionists are not allowed to approve refunds.' });
+        }
+
         const { Refund, BillingActivityLog } = getModels(req);
         const refund = await Refund.findById(id);
         if (!refund) return res.status(404).json({ success: false, message: 'Refund request not found.' });
@@ -485,6 +648,26 @@ router.put('/refunds/:id/approve', verifyBillingAccess, async (req, res) => {
         });
 
         await refund.save();
+
+        // Also update the copy in the Master DB (HSM)
+        try {
+            const masterRefund = await MasterRefund.findById(id);
+            if (masterRefund) {
+                masterRefund.status = 'Refunded';
+                masterRefund.approvedBy = req.user._id;
+                masterRefund.approvedByName = req.user.name || 'Staff';
+                masterRefund.actionDate = refund.actionDate;
+                masterRefund.history.push({
+                    status: 'Refunded',
+                    performedBy: req.user._id,
+                    performedByName: req.user.name || 'Staff',
+                    notes: notes || 'Refund request approved and processed.'
+                });
+                await masterRefund.save();
+            }
+        } catch (masterErr) {
+            console.error('Failed to update refund copy in master DB:', masterErr.message);
+        }
 
         await new BillingActivityLog({
             hospitalId: refund.hospitalId,

@@ -48,14 +48,17 @@ function sanitizeDbName(hospitalId) {
 async function getTenantConnection(hospitalId) {
     const dbName = sanitizeDbName(hospitalId);
 
-    // Return cached connection if already open
+    // If there is a cached connection promise, check if it's resolved and still open/active
     if (connectionCache.has(dbName)) {
-        const cached = connectionCache.get(dbName);
-        // Make sure the connection is still alive
-        if (cached.readyState === 1 /* connected */) {
-            return cached;
+        const cachedPromise = connectionCache.get(dbName);
+        try {
+            const connection = await cachedPromise;
+            if (connection.readyState === 1 /* connected */) {
+                return connection;
+            }
+        } catch (err) {
+            // Promise failed or connection is dead/closing. Delete it from cache.
         }
-        // Remove stale connection from cache
         connectionCache.delete(dbName);
     }
 
@@ -64,23 +67,44 @@ async function getTenantConnection(hospitalId) {
 
     console.log(`🏥 Opening tenant DB connection: ${dbName}`);
 
-    const connection = mongoose.createConnection(tenantUri, {
-        serverSelectionTimeoutMS: 30000,
-        socketTimeoutMS: 45000,
-        connectTimeoutMS: 30000,
-        maxPoolSize: 5,
+    const connectionPromise = (async () => {
+        const connection = mongoose.createConnection(tenantUri, {
+            serverSelectionTimeoutMS: 30000,
+            socketTimeoutMS: 45000,
+            connectTimeoutMS: 30000,
+            maxPoolSize: 5,
+        });
+
+        await new Promise((resolve, reject) => {
+            const onOpen = () => {
+                connection.removeListener('error', onError);
+                resolve();
+            };
+            const onError = (err) => {
+                connection.removeListener('open', onOpen);
+                reject(err);
+            };
+            connection.once('open', onOpen);
+            connection.once('error', onError);
+        });
+
+        console.log(`✅ Tenant DB connected: ${dbName}`);
+        connectionPromise.value = connection;
+        return connection;
+    })();
+
+    // Store the promise in the cache immediately so concurrent requests share it
+    connectionCache.set(dbName, connectionPromise);
+
+    // If the connection setup fails, we want to remove the failed promise from the cache
+    // so subsequent attempts can try again.
+    connectionPromise.catch(() => {
+        if (connectionCache.get(dbName) === connectionPromise) {
+            connectionCache.delete(dbName);
+        }
     });
 
-    // Wait for the connection to be established
-    await new Promise((resolve, reject) => {
-        connection.once('open', resolve);
-        connection.once('error', reject);
-    });
-
-    console.log(`✅ Tenant DB connected: ${dbName}`);
-    connectionCache.set(dbName, connection);
-
-    return connection;
+    return connectionPromise;
 }
 
 /**
@@ -105,8 +129,11 @@ function getTenantDbName(hospitalId) {
 async function removeTenantConnection(hospitalId) {
     const dbName = sanitizeDbName(hospitalId);
     if (connectionCache.has(dbName)) {
-        const conn = connectionCache.get(dbName);
-        try { await conn.close(); } catch (e) { /* ignore */ }
+        const promise = connectionCache.get(dbName);
+        try {
+            const conn = await promise;
+            await conn.close();
+        } catch (e) { /* ignore */ }
         connectionCache.delete(dbName);
         console.log(`🗑️  Removed tenant connection from cache: ${dbName}`);
     }
@@ -118,12 +145,21 @@ async function removeTenantConnection(hospitalId) {
  */
 function getActiveConnections() {
     const active = [];
-    for (const [dbName, conn] of connectionCache.entries()) {
-        active.push({
-            dbName,
-            readyState: conn.readyState, // 1 = connected
-            host: conn.host,
-        });
+    for (const [dbName, promise] of connectionCache.entries()) {
+        const conn = promise.value;
+        if (conn) {
+            active.push({
+                dbName,
+                readyState: conn.readyState, // 1 = connected
+                host: conn.host,
+            });
+        } else {
+            active.push({
+                dbName,
+                readyState: 2, // 2 = connecting
+                host: null,
+            });
+        }
     }
     return active;
 }

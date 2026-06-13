@@ -152,7 +152,7 @@ const generatePrescriptionSlipPDF = (consulting, rx, vitalsData) => {
     }
 
     // Lab Tests
-    const labArr = typeof rx.labTests === 'string' ? rx.labTests.split(',').map(t => t.trim()).filter(Boolean) : (rx.labTests || []);
+    const labArr = typeof rx.labTests === 'string' ? rx.labTests.split(/(?:,\s*)+(?![^(]*\))/).map(t => t.trim()).filter(Boolean) : (rx.labTests || []);
     doc.setFontSize(11); doc.setFont('helvetica', 'bold'); doc.setTextColor(33, 37, 41);
     doc.text('Lab Tests Ordered', 14, y); y += 6;
     if (labArr.length > 0) {
@@ -516,6 +516,8 @@ const PatientsMode = ({ onBookToken }) => {
     const [saving, setSaving] = useState(false);
     const [msg, setMsg] = useState({ type: '', text: '' });
     const [justRegistered, setJustRegistered] = useState(null);
+    const [regReportFile, setRegReportFile] = useState(null);
+    const [regReportName, setRegReportName] = useState('');
     // Reports state
     const [patientReports, setPatientReports] = useState([]);
     const [viewReport, setViewReport] = useState(null);
@@ -594,9 +596,19 @@ const PatientsMode = ({ onBookToken }) => {
         try {
             const r = await clinicAPI.registerPatient(form);
             if (r.success) {
+                if (regReportFile) {
+                    try {
+                        const rName = regReportName.trim() || regReportFile.name;
+                        await clinicAPI.uploadPatientReport(r.patient._id, regReportFile, rName);
+                    } catch (uploadErr) {
+                        console.error("Failed to upload report on patient registration", uploadErr);
+                    }
+                }
                 if (!r.existing) setPatients(prev => [r.patient, ...prev]);
                 setJustRegistered(r.patient);
                 setForm({ name: '', phone: '', email: '', dob: '', gender: 'Male', address: '', bloodGroup: '', allergies: '', chronicConditions: '', relatives: [] });
+                setRegReportFile(null);
+                setRegReportName('');
                 try { generateRegistrationSlipPDF(r.patient); } catch (pdfErr) { console.error('PDF generation error:', pdfErr); }
             } else flash('error', r.message);
         } catch (e) { flash('error', e.response?.data?.message || e.message); }
@@ -916,6 +928,20 @@ const PatientsMode = ({ onBookToken }) => {
                                     )}
                                 </div>
 
+                                <div className="clinic-form-group" style={{ gridColumn: '1/-1', borderTop: '1px solid #e2e8f0', paddingTop: '16px', marginTop: '10px' }}>
+                                    <label style={{ fontWeight: '700', fontSize: '13px', color: '#6366f1' }}>📋 Previous Hospital Report (Optional)</label>
+                                    <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap', marginTop: '8px' }}>
+                                        <div style={{ flex: 1, minWidth: '200px' }}>
+                                            <input type="file" accept=".pdf,image/*" onChange={e => setRegReportFile(e.target.files[0])} style={{ padding: '6px', fontSize: '13px', width: '100%', border: '1px dashed #6366f1', borderRadius: '6px', background: '#f5f3ff', boxSizing: 'border-box' }} />
+                                        </div>
+                                        {regReportFile && (
+                                            <div style={{ flex: 1, minWidth: '150px' }}>
+                                                <input className="clinic-input" placeholder="Friendly name for report (e.g. Previous MRI)" value={regReportName} onChange={e => setRegReportName(e.target.value)} />
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+
                                 <div style={{ gridColumn: '1/-1' }}>
                                     <button type="submit" className="clinic-btn-primary" disabled={saving}>
                                         {saving ? 'Registering...' : '✅ Register Patient'}
@@ -1096,6 +1122,8 @@ const ReceptionMode = ({ preselectedPatient, clearPreselected }) => {
     const [showQuickReg, setShowQuickReg] = useState(false);
     const [qrForm, setQrForm] = useState({ name: '', phone: '', gender: 'Male' });
     const [qrSaving, setQrSaving] = useState(false);
+    const [qrReportFile, setQrReportFile] = useState(null);
+    const [qrReportName, setQrReportName] = useState('');
 
     const flash = (type, text) => { setMsg({ type, text }); setTimeout(() => setMsg({ type: '', text: '' }), 4000); };
     const today = todayStr();
@@ -1141,10 +1169,20 @@ const ReceptionMode = ({ preselectedPatient, clearPreselected }) => {
         try {
             const r = await clinicAPI.registerPatient(qrForm);
             if (r.success) {
+                if (qrReportFile) {
+                    try {
+                        const rName = qrReportName.trim() || qrReportFile.name;
+                        await clinicAPI.uploadPatientReport(r.patient._id, qrReportFile, rName);
+                    } catch (uploadErr) {
+                        console.error("Failed to upload report on quick patient registration", uploadErr);
+                    }
+                }
                 setPatients(prev => r.existing ? prev : [r.patient, ...prev]);
                 setAssigningFor(r.patient._id);
                 setShowQuickReg(false);
                 setQrForm({ name: '', phone: '', gender: 'Male' });
+                setQrReportFile(null);
+                setQrReportName('');
                 if (clearPreselected) clearPreselected();
                 flash('success', `${r.existing ? 'Found' : 'Registered'}: ${r.patient.patientUid} — ${isSlotMode ? 'book an appointment below.' : 'assign a token below.'}`);
             } else flash('error', r.message);
@@ -1226,6 +1264,16 @@ const ReceptionMode = ({ preselectedPatient, clearPreselected }) => {
                                     <option>Male</option><option>Female</option><option>Other</option>
                                 </select>
                             </div>
+                            <div style={{ flex: '2', minWidth: '160px' }}>
+                                <label style={{ fontSize: '11px', color: '#6366f1', display: 'block', marginBottom: '3px', fontWeight: 'bold' }}>📋 Past Report (Optional)</label>
+                                <input type="file" accept=".pdf,image/*" onChange={e => setQrReportFile(e.target.files[0])} style={{ padding: '5px', fontSize: '11px', width: '100%', border: '1px dashed #6366f1', borderRadius: '6px', background: '#f5f3ff', boxSizing: 'border-box' }} />
+                            </div>
+                            {qrReportFile && (
+                                <div style={{ flex: '1', minWidth: '120px' }}>
+                                    <label style={{ fontSize: '11px', color: '#64748b', display: 'block', marginBottom: '3px' }}>Report Friendly Name</label>
+                                    <input className="clinic-input" placeholder="Ex: MRI, ECG" value={qrReportName} onChange={e => setQrReportName(e.target.value)} style={{ padding: '6px' }} />
+                                </div>
+                            )}
                             <div style={{ display: 'flex', gap: '6px' }}>
                                 <button type="submit" className="clinic-btn-primary" disabled={qrSaving} style={{ whiteSpace: 'nowrap' }}>
                                     {qrSaving ? '...' : isSlotMode ? '✅ Register & Book' : '✅ Register & Assign Token'}
@@ -1544,7 +1592,7 @@ const DoctorMode = () => {
     const saveConsult = async () => {
         setSaving(true);
         try {
-            const labArr = rx.labTests.split(',').map(t => t.trim()).filter(Boolean);
+            const labArr = rx.labTests.split(/(?:,\s*)+(?![^(]*\))/).map(t => t.trim()).filter(Boolean);
             const r = await clinicAPI.completeAppointment(consulting._id, {
                 diagnosis: rx.diagnosis,
                 notes: rx.notes,

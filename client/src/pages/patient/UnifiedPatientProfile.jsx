@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { patientAPI } from '../../utils/api';
+import { patientAPI, receptionAPI } from '../../utils/api';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import './UnifiedPatientProfile.css';
@@ -12,6 +12,10 @@ const UnifiedPatientProfile = () => {
     const [timeline, setTimeline] = useState([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
+
+    const [uploadingReport, setUploadingReport] = useState(false);
+    const [profileReportFile, setProfileReportFile] = useState(null);
+    const [profileReportName, setProfileReportName] = useState('');
 
     useEffect(() => {
         const fetchProfile = async () => {
@@ -234,6 +238,55 @@ const UnifiedPatientProfile = () => {
     const upcomingAppts = getUpcomingAppointments();
     const labStatus = getLabTestStatus();
     const meds = getMedications();
+
+    const currentUser = JSON.parse(localStorage.getItem('user') || '{}');
+    const role = (currentUser.role || currentUser._roleData?.name || '').toLowerCase();
+    const canManageReports = ['receptionist', 'reception', 'receptiondeskmanager', 'admin', 'hospitaladmin', 'superadmin', 'frontdesk'].includes(role);
+
+    const handleUploadReportDirect = async (e) => {
+        e.preventDefault();
+        if (!profileReportFile) {
+            alert("Please select a file to upload.");
+            return;
+        }
+        setUploadingReport(true);
+        try {
+            const res = await receptionAPI.uploadPastReport(patientId, profileReportFile, profileReportName);
+            if (res.success && res.report) {
+                setPatientData(prev => ({
+                    ...prev,
+                    pastReports: [...(prev.pastReports || []), res.report]
+                }));
+                setProfileReportFile(null);
+                setProfileReportName('');
+                const el = document.getElementById('direct-report-picker');
+                if (el) el.value = '';
+                alert("Report uploaded successfully!");
+            }
+        } catch (err) {
+            console.error("Direct upload failed", err);
+            alert(err.response?.data?.message || "Failed to upload report.");
+        } finally {
+            setUploadingReport(false);
+        }
+    };
+
+    const handleDeleteReportDirect = async (reportId) => {
+        if (!window.confirm("Are you sure you want to delete this previous report?")) return;
+        try {
+            const res = await receptionAPI.deletePastReport(patientId, reportId);
+            if (res.success) {
+                setPatientData(prev => ({
+                    ...prev,
+                    pastReports: (prev.pastReports || []).filter(r => r._id !== reportId)
+                }));
+                alert("Report deleted successfully.");
+            }
+        } catch (err) {
+            console.error("Direct delete failed", err);
+            alert("Failed to delete report.");
+        }
+    };
 
     return (
         <div className="upp-container">
@@ -481,6 +534,73 @@ const UnifiedPatientProfile = () => {
                                 </div>
                             );
                         })}
+                    </div>
+
+                    <div className="upp-section" style={{ borderLeft: '4px solid #8b5cf6' }}>
+                        <h3>Previous Hospital Reports</h3>
+                        {(!patientData.pastReports || patientData.pastReports.length === 0) ? (
+                            <p style={{ color: '#64748b', fontSize: '14px', margin: 0, fontStyle: 'italic' }}>No historical reports uploaded.</p>
+                        ) : (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginBottom: '16px' }}>
+                                {patientData.pastReports.map((report) => {
+                                    const BASE = import.meta.env.VITE_API_URL || 'https://hms-h939.onrender.com';
+                                    const url = report.url || report.fileUrl || (report.filename ? `${BASE}/uploads/patient-reports/${encodeURIComponent(report.filename)}` : null);
+                                    return (
+                                        <div key={report._id} style={{ padding: '10px', background: '#fdf4ff', borderRadius: '8px', border: '1px solid #f3e8ff', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                            <div style={{ flex: 1, minWidth: 0, marginRight: '10px' }}>
+                                                <div style={{ fontWeight: '600', fontSize: '13px', color: '#1e293b', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={report.name}>
+                                                    📄 {report.name}
+                                                </div>
+                                                <div style={{ fontSize: '11px', color: '#64748b', marginTop: '2px' }}>
+                                                    {report.uploadedAt && new Date(report.uploadedAt).toLocaleDateString('en-IN')}
+                                                </div>
+                                            </div>
+                                            <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                                                {url && (
+                                                    <a href={url} target="_blank" rel="noreferrer" style={{ background: '#8b5cf6', color: 'white', padding: '4px 8px', borderRadius: '4px', fontSize: '11px', fontWeight: 'bold', textDecoration: 'none' }}>
+                                                        View
+                                                    </a>
+                                                )}
+                                                {canManageReports && (
+                                                    <button type="button" onClick={() => handleDeleteReportDirect(report._id)} style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', padding: '2px 4px', fontSize: '14px' }}>
+                                                        🗑️
+                                                    </button>
+                                                )}
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        )}
+
+                        {canManageReports && (
+                            <form onSubmit={handleUploadReportDirect} style={{ borderTop: '1px solid #f3e8ff', paddingTop: '12px', marginTop: '12px' }}>
+                                <div style={{ fontSize: '12px', fontWeight: 'bold', color: '#6b21a8', marginBottom: '8px' }}>Upload New Past Report:</div>
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                                    <input
+                                        type="file"
+                                        id="direct-report-picker"
+                                        accept="image/*,application/pdf"
+                                        onChange={e => setProfileReportFile(e.target.files[0])}
+                                        style={{ fontSize: '12px', padding: '6px', border: '1px dashed #d8b4fe', borderRadius: '6px', background: '#faf5ff' }}
+                                    />
+                                    <input
+                                        type="text"
+                                        placeholder="Report Friendly Name"
+                                        value={profileReportName}
+                                        onChange={e => setProfileReportName(e.target.value)}
+                                        style={{ fontSize: '12px', padding: '6px 8px', border: '1px solid #d8b4fe', borderRadius: '6px', outline: 'none' }}
+                                    />
+                                    <button
+                                        type="submit"
+                                        disabled={uploadingReport}
+                                        style={{ background: '#8b5cf6', color: 'white', border: 'none', padding: '6px 12px', borderRadius: '6px', fontSize: '12px', fontWeight: 'bold', cursor: 'pointer', opacity: uploadingReport ? 0.7 : 1 }}
+                                    >
+                                        {uploadingReport ? 'Uploading...' : 'Upload Report'}
+                                    </button>
+                                </div>
+                            </form>
+                        )}
                     </div>
                 </div>
 

@@ -347,8 +347,9 @@ router.post('/login', loginLimiter, async (req, res) => {
       clinicType,
       permissions: roleData.permissions || [],
       customPermissions: user.customPermissions || [],
-      // effectivePermissions = role permissions merged with any custom per-user grants
-      effectivePermissions: Array.from(new Set([...(roleData.permissions || []), ...(user.customPermissions || [])])),
+      deniedPermissions: user.deniedPermissions || [],
+      // effectivePermissions = (role permissions + custom permissions) - denied permissions (de-duped)
+      effectivePermissions: Array.from(new Set([...(roleData.permissions || []), ...(user.customPermissions || [])].filter(p => !(user.deniedPermissions || []).includes(p)))),
       dashboardPath: roleData.dashboardPath || '/',
       navLinks: roleData.navLinks || []
     };
@@ -411,6 +412,138 @@ router.post('/logout', verifyToken, auditLog('STAFF_LOGOUT'), async (req, res) =
     } catch (error) {
         res.status(500).json({ success: false, message: 'An internal error occurred' });
     }
+});
+
+// GET /api/auth/me — get current staff/admin profile and updated permissions
+router.get('/me', verifyToken, async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id);
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+    
+    // Fetch full role data for this user
+    let roleData = null;
+    const specialRoles = ['superadmin', 'centraladmin', 'hospitaladmin'];
+    
+    if (specialRoles.includes(user.role)) {
+      const isCentral = user.role === 'centraladmin' || user.role === 'superadmin';
+      roleData = {
+        name: user.role,
+        permissions: isCentral ? ['*'] : ['admin_manage_roles', 'admin_view_stats'],
+        dashboardPath: isCentral ? '/supremeadmin' : '/hospitaladmin',
+        navLinks: [],
+        isSystemRole: true
+      };
+    } else if (user.role) {
+      if (mongoose.Types.ObjectId.isValid(user.role)) {
+        roleData = await Role.findById(user.role);
+      }
+    }
+    
+    let clinicType = null;
+    if (user.hospitalId) {
+      try {
+        const hosp = await Hospital.findById(user.hospitalId).select('clinicType');
+        clinicType = hosp?.clinicType || 'hospital';
+      } catch (_) {}
+    }
+    
+    const userData = {
+      id: user._id,
+      name: user.name,
+      email: user.email,
+      phone: user.phone,
+      role: roleData ? roleData.name : user.role,
+      roleId: String(user.role),
+      patientId: user.patientId || null,
+      hospitalId: user.hospitalId ? String(user.hospitalId) : null,
+      clinicType,
+      permissions: roleData ? roleData.permissions : [],
+      customPermissions: user.customPermissions || [],
+      deniedPermissions: user.deniedPermissions || [],
+      // effectivePermissions = (role permissions + custom permissions) - denied permissions (de-duped)
+      effectivePermissions: Array.from(new Set([...(roleData?.permissions || []), ...(user.customPermissions || [])].filter(p => !(user.deniedPermissions || []).includes(p)))),
+      dashboardPath: roleData ? roleData.dashboardPath : '/',
+      navLinks: roleData ? roleData.navLinks : []
+    };
+    
+    res.json({
+      success: true,
+      user: userData
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: 'Error fetching profile: ' + error.message });
+  }
+});
+
+// PUT /api/auth/profile — update the currently-logged-in user's profile in the DB
+router.put('/profile', verifyToken, async (req, res) => {
+  try {
+    const { name, email, phone, avatar } = req.body;
+    const updateFields = {};
+    if (name  !== undefined) updateFields.name  = name.trim();
+    if (email !== undefined) updateFields.email = email.trim().toLowerCase();
+    if (phone !== undefined) updateFields.phone = phone.trim();
+    if (avatar !== undefined) updateFields.avatar = avatar;
+
+    if (Object.keys(updateFields).length === 0) {
+      return res.status(400).json({ success: false, message: 'No fields to update' });
+    }
+
+    const user = await User.findByIdAndUpdate(
+      req.user._id,
+      { $set: updateFields },
+      { new: true, runValidators: true }
+    );
+
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
+    // Return the minimal updated profile so the client can merge it into Redux / localStorage
+    res.json({
+      success: true,
+      message: 'Profile updated successfully',
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        phone: user.phone || '',
+        avatar: user.avatar || '',
+      }
+    });
+  } catch (error) {
+    console.error('Profile update error:', error);
+    res.status(500).json({ success: false, message: 'Error updating profile: ' + error.message });
+  }
+});
+
+// PUT /api/auth/change-password — change password for the currently-logged-in user
+router.put('/change-password', verifyToken, async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ success: false, message: 'Both currentPassword and newPassword are required' });
+    }
+    if (newPassword.length < 6) {
+      return res.status(400).json({ success: false, message: 'New password must be at least 6 characters' });
+    }
+
+    const user = await User.findById(req.user._id).select('+password');
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
+    const bcrypt = require('bcryptjs');
+    const isMatch = await bcrypt.compare(currentPassword, user.password);
+    if (!isMatch) {
+      return res.status(400).json({ success: false, message: 'Current password is incorrect' });
+    }
+
+    const salt = await bcrypt.genSalt(10);
+    user.password = await bcrypt.hash(newPassword, salt);
+    await user.save();
+
+    res.json({ success: true, message: 'Password changed successfully' });
+  } catch (error) {
+    console.error('Change password error:', error);
+    res.status(500).json({ success: false, message: 'Error changing password: ' + error.message });
+  }
 });
 
 module.exports = router;

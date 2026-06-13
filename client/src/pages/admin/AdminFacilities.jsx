@@ -9,6 +9,9 @@ const AdminFacilities = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [editingIdx, setEditingIdx] = useState(-1);
+  const [editForm, setEditForm] = useState({ pricePerDay: 0, bedCount: 0 });
 
   useEffect(() => {
     const user = JSON.parse(localStorage.getItem('user') || '{}');
@@ -37,18 +40,22 @@ const AdminFacilities = () => {
 
   const handleAddFacility = async (e) => {
     e.preventDefault();
+    if (submitting) return;
+    setSubmitting(true);
     setError('');
     setSuccess('');
     const name = e.target.name.value.trim();
     const price = Number(e.target.price.value);
+    const bedCount = Number(e.target.bedCount.value) || 0;
 
     if (!name || isNaN(price)) {
       setError('Facility name and price per day are required');
+      setSubmitting(false);
       return;
     }
 
     try {
-      const newFacility = { name, pricePerDay: price };
+      const newFacility = { name, pricePerDay: price, bedCount };
       const newFacilities = [...(hospitalInfo?.facilities || []), newFacility];
       const res = await hospitalAPI.updateFacilities({ facilities: newFacilities });
       if (res.success) {
@@ -58,11 +65,41 @@ const AdminFacilities = () => {
       }
     } catch (err) {
       setError(err.response?.data?.message || 'Error adding facility');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleSaveEdit = async (idx) => {
+    if (submitting) return;
+    setSubmitting(true);
+    setError('');
+    setSuccess('');
+
+    try {
+      const newFacilities = [...hospitalInfo.facilities];
+      newFacilities[idx] = {
+        ...newFacilities[idx],
+        pricePerDay: Number(editForm.pricePerDay),
+        bedCount: Number(editForm.bedCount)
+      };
+      const res = await hospitalAPI.updateFacilities({ facilities: newFacilities });
+      if (res.success) {
+        setHospitalInfo(res.hospital);
+        setSuccess('Facility updated successfully!');
+        setEditingIdx(-1);
+      }
+    } catch (err) {
+      setError(err.response?.data?.message || 'Error updating facility');
+    } finally {
+      setSubmitting(false);
     }
   };
 
   const handleDeleteFacility = async (idx) => {
+    if (submitting) return;
     if (!window.confirm('Are you sure you want to delete this facility/ward?')) return;
+    setSubmitting(true);
     setError('');
     setSuccess('');
 
@@ -75,6 +112,8 @@ const AdminFacilities = () => {
       }
     } catch (err) {
       setError(err.response?.data?.message || 'Error deleting facility');
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -121,10 +160,20 @@ const AdminFacilities = () => {
                   required
                 />
               </div>
+              <div className="form-group">
+                <label htmlFor="bedCount">Number of Beds (Optional)</label>
+                <input
+                  type="number"
+                  id="bedCount"
+                  name="bedCount"
+                  placeholder="e.g., 10"
+                  min="0"
+                />
+              </div>
             </div>
             <div className="form-actions" style={{ marginTop: '10px' }}>
-              <button type="submit" className="btn btn-primary">
-                + Add Facility
+              <button type="submit" className="btn btn-primary" disabled={submitting}>
+                {submitting ? 'Adding...' : '+ Add Facility'}
               </button>
             </div>
           </form>
@@ -142,6 +191,7 @@ const AdminFacilities = () => {
                 <tr>
                   <th>Facility/Ward Name</th>
                   <th>Price Per Day</th>
+                  <th>Total Beds</th>
                   <th>Actions</th>
                 </tr>
               </thead>
@@ -149,15 +199,42 @@ const AdminFacilities = () => {
                 {hospitalInfo.facilities.map((fac, idx) => (
                   <tr key={idx}>
                     <td style={{ fontWeight: 600 }}>{fac.name}</td>
-                    <td>{formatCurrency(fac.pricePerDay)} / day</td>
-                    <td>
-                      <button
-                        onClick={() => handleDeleteFacility(idx)}
-                        className="btn-delete"
-                      >
-                        Delete
-                      </button>
-                    </td>
+                    {editingIdx === idx ? (
+                      <>
+                        <td>
+                          <input type="number" value={editForm.pricePerDay} onChange={e => setEditForm(p => ({ ...p, pricePerDay: e.target.value }))} style={{ width: '80px', padding: '4px' }} min="0" /> / day
+                        </td>
+                        <td>
+                          <input type="number" value={editForm.bedCount} onChange={e => setEditForm(p => ({ ...p, bedCount: e.target.value }))} style={{ width: '60px', padding: '4px' }} min="0" /> Beds
+                        </td>
+                        <td>
+                          <button onClick={() => handleSaveEdit(idx)} className="btn-primary" disabled={submitting} style={{ marginRight: '5px', padding: '5px 10px', fontSize: '12px' }}>Save</button>
+                          <button onClick={() => setEditingIdx(-1)} className="btn-secondary" disabled={submitting} style={{ padding: '5px 10px', fontSize: '12px' }}>Cancel</button>
+                        </td>
+                      </>
+                    ) : (
+                      <>
+                        <td>{formatCurrency(fac.pricePerDay)} / day</td>
+                        <td>{fac.bedCount || 0} Beds</td>
+                        <td>
+                          <button
+                            onClick={() => { setEditingIdx(idx); setEditForm({ pricePerDay: fac.pricePerDay, bedCount: fac.bedCount || 0 }); }}
+                            className="btn-secondary"
+                            disabled={submitting}
+                            style={{ marginRight: '5px' }}
+                          >
+                            Edit
+                          </button>
+                          <button
+                            onClick={() => handleDeleteFacility(idx)}
+                            className="btn-delete"
+                            disabled={submitting}
+                          >
+                            Delete
+                          </button>
+                        </td>
+                      </>
+                    )}
                   </tr>
                 ))}
               </tbody>

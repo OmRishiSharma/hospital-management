@@ -1,14 +1,30 @@
 // server/src/routes/pharmacyOrders.routes.js
 const express = require('express');
 const router = express.Router();
-const PharmacyOrder = require('../models/pharmacyOrder.model');
-const Inventory = require('../models/inventory.model');
+const { resolveTenant } = require('../middleware/tenantMiddleware');
+const { getTenantModels } = require('../db/tenantModels');
 const { verifyToken } = require('../middleware/auth.middleware');
+const Doctor = require('../models/doctor.model');
 
-const User = require('../models/user.model');
+const getModels = (req) => {
+    if (req.tenantDb) {
+        const m = getTenantModels(req.tenantDb);
+        return {
+            PharmacyOrder: m.PharmacyOrder,
+            Inventory: m.Inventory,
+            User: m.User
+        };
+    }
+    return {
+        PharmacyOrder: require('../models/pharmacyOrder.model'),
+        Inventory: require('../models/inventory.model'),
+        User: require('../models/user.model')
+    };
+};
 
 const populateInventoryPrices = async (orders, req) => {
     try {
+        const { Inventory } = getModels(req);
         const targetHospitalId = req.user.hospitalId;
         let allInventory = [];
         if (targetHospitalId) {
@@ -106,8 +122,9 @@ const populateInventoryPrices = async (orders, req) => {
 };
 
 // GET all orders for the pharmacy dashboard (Admin/Pharmacy role)
-router.get('/', verifyToken, async (req, res) => {
+router.get('/', verifyToken, resolveTenant, async (req, res) => {
     try {
+        const { PharmacyOrder, User } = getModels(req);
         let query = {};
         // HARD ISOLATION: Use hospitalId directly on the order document
         if (req.user.hospitalId) {
@@ -116,111 +133,118 @@ router.get('/', verifyToken, async (req, res) => {
 
         const orders = await PharmacyOrder.find(query)
             .populate('userId', 'name phone email')
-            .populate('doctorId', 'name')
+            .populate({ path: 'doctorId', model: User, select: 'name' })
             .sort({ createdAt: -1 });
         
         await populateInventoryPrices(orders, req);
         
         res.json({ success: true, orders });
     } catch (error) {
+        console.error("Fetch orders error:", error);
         res.status(500).json({ success: false, message: 'An internal error occurred' });
     }
 });
 
 // GET orders for the currently logged-in patient (User role)
-router.get('/my-orders', verifyToken, async (req, res) => {
+router.get('/my-orders', verifyToken, resolveTenant, async (req, res) => {
     try {
+        const { PharmacyOrder, User } = getModels(req);
         const orders = await PharmacyOrder.find({ userId: req.user.userId })
-            .populate('doctorId', 'name')
+            .populate({ path: 'doctorId', model: User, select: 'name' })
             .sort({ createdAt: -1 });
         
         await populateInventoryPrices(orders, req);
         
         res.json({ success: true, orders });
     } catch (error) {
+        console.error("Fetch patient orders error:", error);
         res.status(500).json({ success: false, message: 'Error fetching your orders' });
     }
 });
 
+const processOrderItemsPricing = async (order, purchasedIndices, itemQuantities, req, Inventory, deductStock) => {
+    const purchasedSet = new Set(
+        purchasedIndices && Array.isArray(purchasedIndices)
+            ? purchasedIndices
+            : order.items.map((_, i) => i) // default: all
+    );
+
+    let totalAmount = 0;
+    for (let idx = 0; idx < order.items.length; idx++) {
+        const item = order.items[idx];
+        const wasPurchased = purchasedSet.has(idx);
+        item.purchased = wasPurchased;
+
+        if (itemQuantities && itemQuantities[idx] !== undefined) {
+            item.quantity = Number(itemQuantities[idx]);
+        }
+
+        if (wasPurchased) {
+            let rawName = item.medicineName.trim();
+            let actualName = rawName.includes(' - ')
+                ? rawName.substring(0, rawName.lastIndexOf(' - ')).trim()
+                : rawName;
+            actualName = actualName.toLowerCase().trim();
+
+            const escapedName = actualName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const invQuery = { name: { $regex: new RegExp(`^${escapedName}$`, 'i') } };
+            if (req.user.hospitalId) invQuery.hospitalId = req.user.hospitalId;
+            let invItem = await Inventory.findOne(invQuery);
+
+            if (!invItem && req.user.hospitalId) {
+                invItem = await Inventory.findOne({ name: { $regex: new RegExp(`^${escapedName}$`, 'i') } });
+            }
+
+            if (!invItem) {
+                const fallbackQuery = { name: { $regex: escapedName, $options: 'i' } };
+                if (req.user.hospitalId) fallbackQuery.hospitalId = req.user.hospitalId;
+                invItem = await Inventory.findOne(fallbackQuery);
+            }
+
+            if (!invItem) {
+                invItem = await Inventory.findOne({ name: { $regex: escapedName, $options: 'i' } });
+            }
+
+            if (invItem) {
+                item.unitPrice = invItem.sellingPrice || 0;
+                const qty = item.quantity || 1;
+                const computedTotalPrice = item.unitPrice * qty;
+                item.totalPrice = computedTotalPrice;
+                item.price = computedTotalPrice;
+                totalAmount += computedTotalPrice;
+
+                if (deductStock) {
+                    const qtyToDeduct = item.quantity || 1;
+                    invItem.stock = Math.max(0, invItem.stock - qtyToDeduct);
+                    await invItem.save();
+                }
+            } else {
+                if (item.unitPrice) {
+                    item.totalPrice = item.unitPrice * (item.quantity || 1);
+                    item.price = item.totalPrice;
+                }
+                totalAmount += item.totalPrice || item.price || 0;
+            }
+        }
+    }
+    
+    order.markModified('items');
+    order.totalAmount = totalAmount;
+    return totalAmount;
+};
+
 // Complete order and payment
-router.patch('/:id/complete', verifyToken, async (req, res) => {
+router.patch('/:id/complete', verifyToken, resolveTenant, async (req, res) => {
     try {
-        const { purchasedIndices } = req.body;
+        const { PharmacyOrder, Inventory } = getModels(req);
+        const { purchasedIndices, itemQuantities } = req.body;
         // HARD ISOLATION: Only allow completing orders from your hospital
         const findQuery = { _id: req.params.id };
         if (req.user.hospitalId) findQuery.hospitalId = req.user.hospitalId;
         const order = await PharmacyOrder.findOne(findQuery);
         if (!order) return res.status(404).json({ success: false, message: "Order not found or unauthorized" });
 
-        // Determine which items are purchased
-        const purchasedSet = new Set(
-            purchasedIndices && Array.isArray(purchasedIndices)
-                ? purchasedIndices
-                : order.items.map((_, i) => i) // default: all
-        );
-
-        // Look up prices from inventory and decrement stock for purchased items
-        let totalAmount = 0;
-        for (let idx = 0; idx < order.items.length; idx++) {
-            const item = order.items[idx];
-            const wasPurchased = purchasedSet.has(idx);
-            item.purchased = wasPurchased;
-
-            if (wasPurchased) {
-                // Extract medicine name — strip trailing " - DosageMg" if appended
-                let rawName = item.medicineName.trim();
-                let actualName = rawName.includes(' - ')
-                    ? rawName.substring(0, rawName.lastIndexOf(' - ')).trim()
-                    : rawName;
-                // Normalize both sides to avoid casing/spacing mismatches
-                actualName = actualName.toLowerCase().trim();
-
-                const escapedName = actualName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                const invQuery = { name: { $regex: new RegExp(`^${escapedName}$`, 'i') } };
-                if (req.user.hospitalId) invQuery.hospitalId = req.user.hospitalId;
-                let invItem = await Inventory.findOne(invQuery);
-
-                // Fallback 1: Exact match without hospitalId restriction
-                if (!invItem && req.user.hospitalId) {
-                    invItem = await Inventory.findOne({ name: { $regex: new RegExp(`^${escapedName}$`, 'i') } });
-                }
-
-                // Fallback 2: Partial match with hospitalId
-                if (!invItem) {
-                    const fallbackQuery = { name: { $regex: escapedName, $options: 'i' } };
-                    if (req.user.hospitalId) fallbackQuery.hospitalId = req.user.hospitalId;
-                    invItem = await Inventory.findOne(fallbackQuery);
-                }
-
-                // Fallback 3: Partial match without hospitalId
-                if (!invItem) {
-                    invItem = await Inventory.findOne({ name: { $regex: escapedName, $options: 'i' } });
-                }
-
-                if (!invItem) {
-                    console.warn(`[Inventory] No match for medicine: "${item.medicineName}" (normalized: "${actualName}")`);
-                }
-
-                if (invItem) {
-                    item.unitPrice = invItem.sellingPrice || 0;
-                    const qty = item.quantity || 1;
-                    const computedTotalPrice = item.unitPrice * qty;
-                    item.totalPrice = computedTotalPrice;
-                    item.price = computedTotalPrice;
-                    totalAmount += computedTotalPrice;
-
-                    // Decrement stock by exact quantity
-                    const qtyToDeduct = item.quantity || 1;
-                    invItem.stock = Math.max(0, invItem.stock - qtyToDeduct);
-                    await invItem.save();
-                } else {
-                    // Fallback to existing price/totalPrice if inventory is not found
-                    totalAmount += item.totalPrice || item.price || 0;
-                }
-            }
-        }
-        order.markModified('items');
-        order.totalAmount = totalAmount;
+        const totalAmount = await processOrderItemsPricing(order, purchasedIndices, itemQuantities, req, Inventory, true);
 
         // Only mark Paid if at least one item was dispensed; otherwise keep Pending
         order.paymentStatus = totalAmount > 0 ? 'Paid' : 'Pending';
@@ -247,13 +271,15 @@ router.patch('/:id/complete', verifyToken, async (req, res) => {
 
         res.json({ success: true, message: 'Order completed successfully', order });
     } catch (error) {
+        console.error("Complete order error:", error);
         res.status(500).json({ success: false, message: 'An internal error occurred' });
     }
 });
 
 // Cancel order
-router.patch('/:id/cancel', verifyToken, async (req, res) => {
+router.patch('/:id/cancel', verifyToken, resolveTenant, async (req, res) => {
     try {
+        const { PharmacyOrder } = getModels(req);
         const findQuery = { _id: req.params.id };
         if (req.user.hospitalId) findQuery.hospitalId = req.user.hospitalId;
         const order = await PharmacyOrder.findOne(findQuery);
@@ -266,23 +292,29 @@ router.patch('/:id/cancel', verifyToken, async (req, res) => {
 
         res.json({ success: true, message: 'Order cancelled successfully', order });
     } catch (error) {
+        console.error("Cancel order error:", error);
         res.status(500).json({ success: false, message: 'An internal error occurred' });
     }
 });
 
 // Mark order as paid (without completing/dispensing)
-router.patch('/:id/mark-paid', verifyToken, async (req, res) => {
+router.patch('/:id/mark-paid', verifyToken, resolveTenant, async (req, res) => {
     try {
+        const { PharmacyOrder, Inventory } = getModels(req);
+        const { purchasedIndices, itemQuantities } = req.body;
         const findQuery = { _id: req.params.id };
         if (req.user.hospitalId) findQuery.hospitalId = req.user.hospitalId;
         const order = await PharmacyOrder.findOne(findQuery);
         if (!order) return res.status(404).json({ success: false, message: "Order not found or unauthorized" });
+
+        await processOrderItemsPricing(order, purchasedIndices, itemQuantities, req, Inventory, false);
 
         order.paymentStatus = 'Paid';
         await order.save();
 
         res.json({ success: true, message: 'Payment marked as paid', order });
     } catch (error) {
+        console.error("Mark paid error:", error);
         res.status(500).json({ success: false, message: 'An internal error occurred' });
     }
 });

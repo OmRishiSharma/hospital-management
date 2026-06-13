@@ -68,10 +68,11 @@ async function buildUserResponse(user) {
         hospitalId: user.hospitalId || null,
         permissions: roleData ? roleData.permissions : [],
         customPermissions: user.customPermissions || [],
-        // effectivePermissions = role permissions + custom permissions (de-duped)
+        deniedPermissions: user.deniedPermissions || [],
+        // effectivePermissions = (role permissions + custom permissions) - denied permissions (de-duped)
         effectivePermissions: roleData
-            ? Array.from(new Set([...(roleData.permissions || []), ...(user.customPermissions || [])]))
-            : (user.customPermissions || []),
+            ? Array.from(new Set([...(roleData.permissions || []), ...(user.customPermissions || [])].filter(p => !(user.deniedPermissions || []).includes(p))))
+            : Array.from(new Set((user.customPermissions || []).filter(p => !(user.deniedPermissions || []).includes(p)))),
         dashboardPath: roleData ? roleData.dashboardPath : '/',
         navLinks: roleData ? roleData.navLinks : [],
         avatar: user.avatar || null,
@@ -157,6 +158,9 @@ router.post('/roles', verifyAdminOrSuperAdmin, async (req, res) => {
         });
         await newRole.save();
 
+        const { syncToTenant } = require('../utils/tenantSync');
+        await syncToTenant('Role', newRole, 'save', roleHospitalId);
+
         res.json({ success: true, message: 'Role created successfully', data: newRole });
     } catch (error) {
         res.status(500).json({ success: false, message: 'An internal error occurred' });
@@ -189,6 +193,10 @@ router.put('/roles/:roleId', verifyAdminOrSuperAdmin, async (req, res) => {
         if (navLinks !== undefined) roleDoc.navLinks = navLinks;
 
         await roleDoc.save();
+
+        const { syncToTenant } = require('../utils/tenantSync');
+        await syncToTenant('Role', roleDoc, 'save', roleDoc.hospitalId);
+
         res.json({ success: true, message: 'Role updated successfully', data: roleDoc });
     } catch (error) {
         res.status(500).json({ success: false, message: 'An internal error occurred' });
@@ -218,6 +226,9 @@ router.delete('/roles/:roleId', verifyAdminOrSuperAdmin, async (req, res) => {
                 message: `Cannot delete role. ${userCount} user(s) still assigned to it.`
             });
         }
+
+        const { syncToTenant } = require('../utils/tenantSync');
+        await syncToTenant('Role', roleDoc, 'delete', roleDoc.hospitalId);
 
         await Role.findByIdAndDelete(roleId);
         res.json({ success: true, message: 'Role deleted successfully' });
@@ -418,6 +429,12 @@ router.post('/users', verifyAdminOrSuperAdmin, async (req, res) => {
 
         await user.save();
 
+        const { syncToTenant } = require('../utils/tenantSync');
+        await syncToTenant('User', user, 'save', assignedHospitalId);
+        if (roleDoc) {
+            await syncToTenant('Role', roleDoc, 'save', assignedHospitalId);
+        }
+
         // Auto-create linked entity profiles with hospitalId
         const roleName = roleDoc.name.toLowerCase();
         try {
@@ -425,15 +442,15 @@ router.post('/users', verifyAdminOrSuperAdmin, async (req, res) => {
                 let doctorId = nanoid(10);
                 while (await Doctor.findOne({ doctorId })) doctorId = nanoid(10);
                 const defaultAvailability = {
-                    monday: { available: false, startTime: '09:00', endTime: '17:00' },
-                    tuesday: { available: false, startTime: '09:00', endTime: '17:00' },
-                    wednesday: { available: false, startTime: '09:00', endTime: '17:00' },
-                    thursday: { available: false, startTime: '09:00', endTime: '17:00' },
-                    friday: { available: false, startTime: '09:00', endTime: '17:00' },
+                    monday: { available: true, startTime: '09:00', endTime: '17:00' },
+                    tuesday: { available: true, startTime: '09:00', endTime: '17:00' },
+                    wednesday: { available: true, startTime: '09:00', endTime: '17:00' },
+                    thursday: { available: true, startTime: '09:00', endTime: '17:00' },
+                    friday: { available: true, startTime: '09:00', endTime: '17:00' },
                     saturday: { available: false, startTime: '09:00', endTime: '17:00' },
                     sunday: { available: false, startTime: '09:00', endTime: '17:00' }
                 };
-                await Doctor.create({
+                const newDoc = await Doctor.create({
                     doctorId, userId: user._id, name: user.name,
                     email: user.email, phone: user.phone,
                     hospitalId: assignedHospitalId,
@@ -441,18 +458,22 @@ router.post('/users', verifyAdminOrSuperAdmin, async (req, res) => {
                     departments: user.departments,
                     specialty: 'General', consultationFee: 0
                 });
+                await syncToTenant('Doctor', newDoc, 'save', assignedHospitalId);
             } else if (roleName === 'lab' || roleName === 'lab technician') {
-                await Lab.create({
+                const newLab = await Lab.create({
                     name: user.name, email: user.email, phone: user.phone,
                     userId: user._id, hospitalId: assignedHospitalId
                 });
+                await syncToTenant('Lab', newLab, 'save', assignedHospitalId);
             } else if (roleName === 'pharmacy' || roleName === 'pharmacist') {
-                await Pharmacy.create({
+                const newPharmacy = await Pharmacy.create({
                     name: user.name, email: user.email, phone: user.phone,
                     userId: user._id, hospitalId: assignedHospitalId
                 });
+                await syncToTenant('Pharmacy', newPharmacy, 'save', assignedHospitalId);
             } else if (roleName === 'reception' || roleName === 'receptionist') {
-                await Reception.create({ userId: user._id, hospitalId: assignedHospitalId });
+                const newRec = await Reception.create({ userId: user._id, hospitalId: assignedHospitalId });
+                await syncToTenant('Reception', newRec, 'save', assignedHospitalId);
             }
         } catch (profileError) {
             console.error('Error creating linked profile:', profileError);
@@ -514,6 +535,9 @@ router.put('/users/:userId', verifyAdminOrSuperAdmin, async (req, res) => {
 
         await user.save();
 
+        const { syncToTenant } = require('../utils/tenantSync');
+        await syncToTenant('User', user, 'save', user.hospitalId);
+
         // Update linked entity profiles
         try {
             const hospitalId = user.hospitalId;
@@ -525,11 +549,11 @@ router.put('/users/:userId', verifyAdminOrSuperAdmin, async (req, res) => {
                     doctorProfile = new Doctor({
                         doctorId, userId: user._id, hospitalId,
                         availability: {
-                            monday: { available: false, startTime: '09:00', endTime: '17:00' },
-                            tuesday: { available: false, startTime: '09:00', endTime: '17:00' },
-                            wednesday: { available: false, startTime: '09:00', endTime: '17:00' },
-                            thursday: { available: false, startTime: '09:00', endTime: '17:00' },
-                            friday: { available: false, startTime: '09:00', endTime: '17:00' },
+                            monday: { available: true, startTime: '09:00', endTime: '17:00' },
+                            tuesday: { available: true, startTime: '09:00', endTime: '17:00' },
+                            wednesday: { available: true, startTime: '09:00', endTime: '17:00' },
+                            thursday: { available: true, startTime: '09:00', endTime: '17:00' },
+                            friday: { available: true, startTime: '09:00', endTime: '17:00' },
                             saturday: { available: false, startTime: '09:00', endTime: '17:00' },
                             sunday: { available: false, startTime: '09:00', endTime: '17:00' }
                         }
@@ -543,17 +567,21 @@ router.put('/users/:userId', verifyAdminOrSuperAdmin, async (req, res) => {
                     if (departments !== undefined) doctorProfile.departments = departments;
                     doctorProfile.hospitalId = hospitalId;
                     await doctorProfile.save();
+                    await syncToTenant('Doctor', doctorProfile, 'save', hospitalId);
                 }
             }
             if (['lab', 'lab technician'].includes(newRoleName)) {
-                await Lab.findOneAndUpdate({ userId: user._id }, { name, email, phone, hospitalId }, { upsert: true });
+                const updatedLab = await Lab.findOneAndUpdate({ userId: user._id }, { name, email, phone, hospitalId }, { upsert: true, new: true });
+                if (updatedLab) await syncToTenant('Lab', updatedLab, 'save', hospitalId);
             }
             if (['pharmacy', 'pharmacist'].includes(newRoleName)) {
-                await Pharmacy.findOneAndUpdate({ userId: user._id }, { name, email, phone, hospitalId }, { upsert: true });
+                const updatedPharm = await Pharmacy.findOneAndUpdate({ userId: user._id }, { name, email, phone, hospitalId }, { upsert: true, new: true });
+                if (updatedPharm) await syncToTenant('Pharmacy', updatedPharm, 'save', hospitalId);
             }
             if (['reception', 'receptionist'].includes(newRoleName)) {
-                const rec = await Reception.findOne({ userId: user._id });
-                if (!rec && roleChanged) await Reception.create({ userId: user._id, hospitalId });
+                let rec = await Reception.findOne({ userId: user._id });
+                if (!rec && roleChanged) rec = await Reception.create({ userId: user._id, hospitalId });
+                if (rec) await syncToTenant('Reception', rec, 'save', hospitalId);
             }
         } catch (profileError) {
             console.error('Error updating linked profile:', profileError);
@@ -592,15 +620,34 @@ router.delete('/users/:userId', verifyAdminOrSuperAdmin, async (req, res) => {
         // Cascade delete entity profiles
         let roleName = null;
         if (user.role && !['centraladmin', 'superadmin', 'hospitaladmin'].includes(user.role)) {
-            const roleDoc = await Role.findById(user.role);
-            roleName = roleDoc ? roleDoc.name.toLowerCase() : null;
+            if (mongoose.Types.ObjectId.isValid(user.role)) {
+                const roleDoc = await Role.findById(user.role);
+                roleName = roleDoc ? roleDoc.name.toLowerCase() : null;
+            } else {
+                roleName = String(user.role).toLowerCase();
+            }
         }
 
-        if (roleName === 'doctor') await Doctor.findOneAndDelete({ userId: user._id });
-        if (roleName === 'lab' || roleName === 'lab technician') await Lab.findOneAndDelete({ userId: user._id });
-        if (roleName === 'pharmacy' || roleName === 'pharmacist') await Pharmacy.findOneAndDelete({ userId: user._id });
-        if (roleName === 'reception' || roleName === 'receptionist') await Reception.findOneAndDelete({ userId: user._id });
+        const { syncToTenant } = require('../utils/tenantSync');
 
+        if (roleName === 'doctor') {
+            const docProf = await Doctor.findOneAndDelete({ userId: user._id });
+            if (docProf) await syncToTenant('Doctor', docProf, 'delete', user.hospitalId);
+        }
+        if (roleName === 'lab' || roleName === 'lab technician') {
+            const labProf = await Lab.findOneAndDelete({ userId: user._id });
+            if (labProf) await syncToTenant('Lab', labProf, 'delete', user.hospitalId);
+        }
+        if (roleName === 'pharmacy' || roleName === 'pharmacist') {
+            const pharmProf = await Pharmacy.findOneAndDelete({ userId: user._id });
+            if (pharmProf) await syncToTenant('Pharmacy', pharmProf, 'delete', user.hospitalId);
+        }
+        if (roleName === 'reception' || roleName === 'receptionist') {
+            const recProf = await Reception.findOneAndDelete({ userId: user._id });
+            if (recProf) await syncToTenant('Reception', recProf, 'delete', user.hospitalId);
+        }
+
+        await syncToTenant('User', user, 'delete', user.hospitalId);
         await User.findByIdAndDelete(userId);
         res.json({ success: true, message: 'User and associated profile deleted successfully' });
     } catch (error) {
@@ -670,7 +717,7 @@ const KNOWN_PERMISSIONS = [
     'patient_create', 'patient_search', 'patient_view', 'patient_edit',
     'visit_intake', 'visit_diagnose', 'clinical_history_view',
     'appointment_manage', 'appointment_view_all',
-    'lab_view', 'lab_manage',
+    'lab_view', 'lab_manage', 'lab_reports_view',
     'pharmacy_view', 'pharmacy_manage',
     'finance_view', 'billing_view', 'billing_manage',
     'admin_manage_roles', 'admin_view_stats',
@@ -689,19 +736,32 @@ const KNOWN_PERMISSIONS = [
 router.put('/users/:userId/permissions', verifyToken, verifySuperAdmin, async (req, res) => {
     try {
         const { userId } = req.params;
-        const { customPermissions } = req.body;
+        const { customPermissions, deniedPermissions } = req.body;
 
         if (!Array.isArray(customPermissions)) {
             return res.status(400).json({ success: false, message: 'customPermissions must be an array of permission strings' });
         }
+        if (deniedPermissions && !Array.isArray(deniedPermissions)) {
+            return res.status(400).json({ success: false, message: 'deniedPermissions must be an array of permission strings' });
+        }
 
         // Validate each permission key
-        const invalid = customPermissions.filter(p => !KNOWN_PERMISSIONS.includes(p));
-        if (invalid.length > 0) {
+        const invalidCustom = customPermissions.filter(p => !KNOWN_PERMISSIONS.includes(p));
+        if (invalidCustom.length > 0) {
             return res.status(400).json({
                 success: false,
-                message: `Unknown permission key(s): ${invalid.join(', ')}. Use the defined permission list.`
+                message: `Unknown custom permission key(s): ${invalidCustom.join(', ')}. Use the defined permission list.`
             });
+        }
+
+        if (deniedPermissions) {
+            const invalidDenied = deniedPermissions.filter(p => !KNOWN_PERMISSIONS.includes(p));
+            if (invalidDenied.length > 0) {
+                return res.status(400).json({
+                    success: false,
+                    message: `Unknown denied permission key(s): ${invalidDenied.join(', ')}. Use the defined permission list.`
+                });
+            }
         }
 
         const user = await User.findById(userId);
@@ -713,12 +773,13 @@ router.put('/users/:userId/permissions', verifyToken, verifySuperAdmin, async (r
         }
 
         user.customPermissions = customPermissions;
+        user.deniedPermissions = deniedPermissions || [];
         await user.save();
 
         const updatedUser = await buildUserResponse(user);
         res.json({
             success: true,
-            message: `Custom permissions updated for ${user.name}`,
+            message: `Permissions updated for ${user.name}`,
             user: updatedUser
         });
     } catch (error) {

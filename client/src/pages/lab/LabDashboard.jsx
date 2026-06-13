@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { labAPI, publicAPI } from '../../utils/api';
+import socket from '../../utils/socket';
 import './LabDashboard.css';
 
 const LabDashboard = () => {
@@ -25,8 +26,24 @@ const LabDashboard = () => {
     useEffect(() => {
         loadStats();
         fetchDoctors();
-        const interval = setInterval(loadStats, 30000);
-        return () => clearInterval(interval);
+
+        const handleLiveRefresh = (notif) => {
+            if (!notif || notif.referenceType === 'LabReport' || notif.message?.toLowerCase().includes('lab')) {
+                loadStats();
+            }
+        };
+
+        socket.on('newNotification', handleLiveRefresh);
+        socket.on('new_notification', handleLiveRefresh);
+        socket.on('sample_collected', loadStats);
+        socket.on('sample_status_updated', loadStats);
+
+        return () => {
+            socket.off('newNotification', handleLiveRefresh);
+            socket.off('new_notification', handleLiveRefresh);
+            socket.off('sample_collected', loadStats);
+            socket.off('sample_status_updated', loadStats);
+        };
     }, []);
 
     const loadStats = async () => {

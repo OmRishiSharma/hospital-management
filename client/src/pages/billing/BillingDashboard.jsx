@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { billingAPI, admissionAPI } from '../../utils/api';
+import { billingAPI, admissionAPI, receptionAPI } from '../../utils/api';
+import { useAuth } from '../../store/hooks';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import {
@@ -8,6 +9,14 @@ import {
     FiDatabase, FiLogOut, FiGrid, FiPieChart, FiSettings, FiSearch, FiPrinter
 } from 'react-icons/fi';
 import './BillingDashboard.css';
+
+
+const getAdmAmt = (a) => {
+    if (!a) return 0;
+    if (a.totalAmount > 0) return a.totalAmount;
+    const days = Math.max(1, Math.floor((new Date() - new Date(a.admissionDate)) / (1000 * 60 * 60 * 24)));
+    return (a.dailyWardCharge || 0) * days;
+};
 
 const fmt = (n) => new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', minimumFractionDigits: 0 }).format(n || 0);
 const fmtDate = (d) => d ? new Date(d).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : '—';
@@ -17,6 +26,22 @@ const BillingDashboard = ({ tab }) => {
     const navigate = useNavigate();
     const [searchParams] = useSearchParams();
     const activeTab = tab || searchParams.get('tab') || 'dashboard';
+    
+    const { user } = useAuth();
+    const userRole = (user?.role || '').toLowerCase();
+    const isReceptionist = userRole === 'receptionist' || userRole === 'reception';
+    const isBillingUser = ['cashier', 'billing', 'billing executive', 'billing manager', 'senior billing officer'].includes(userRole);
+    const isAccountant = userRole === 'accountant';
+
+    useEffect(() => {
+        if (isReceptionist && ['dashboard', 'reports', 'analytics', 'templates', 'settings', 'history'].includes(activeTab)) {
+            navigate('/billing/patient', { replace: true });
+        } else if (isBillingUser && ['reports', 'analytics'].includes(activeTab)) {
+            navigate('/billing/dashboard', { replace: true });
+        } else if (isAccountant && ['patient', 'pending', 'invoices', 'collect', 'history', 'refunds'].includes(activeTab)) {
+            navigate('/billing/dashboard', { replace: true });
+        }
+    }, [activeTab, isReceptionist, isBillingUser, isAccountant, navigate]);
 
     // Global States
     const [analytics, setAnalytics] = useState(null);
@@ -44,8 +69,55 @@ const BillingDashboard = ({ tab }) => {
     // Refunds state
     const [refunds, setRefunds] = useState([]);
     const [refundModal, setRefundModal] = useState(false);
-    const [refundForm, setRefundForm] = useState({ type: 'Manual Refund', amount: 0, reason: '', itemId: '', invoiceNumber: '' });
+    const [refundForm, setRefundForm] = useState({ 
+        type: 'Manual Refund', 
+        amount: 0, 
+        reason: '', 
+        itemId: '', 
+        invoiceNumber: '',
+        patientId: '',
+        patientName: '',
+        patientPhone: ''
+    });
     const [submittingRefund, setSubmittingRefund] = useState(false);
+
+    // Patient selection in modal
+    const [modalSearchQuery, setModalSearchQuery] = useState('');
+    const [modalSearchResults, setModalSearchResults] = useState([]);
+    const [selectedModalPatient, setSelectedModalPatient] = useState(null);
+
+    useEffect(() => {
+        if (refundModal) {
+            // ONLY pre-populate the patient if we are on the 'patient' tab (viewing a specific patient's profile)
+            if (activeTab === 'patient' && patient) {
+                setSelectedModalPatient(patient);
+                setRefundForm({
+                    patientId: patient._id,
+                    patientName: patient.name,
+                    patientPhone: patient.phone || '',
+                    type: 'Manual Refund',
+                    amount: 0,
+                    reason: '',
+                    itemId: '',
+                    invoiceNumber: ''
+                });
+            } else {
+                setSelectedModalPatient(null);
+                setModalSearchQuery('');
+                setModalSearchResults([]);
+                setRefundForm({
+                    patientId: '',
+                    patientName: '',
+                    patientPhone: '',
+                    type: 'Manual Refund',
+                    amount: 0,
+                    reason: '',
+                    itemId: '',
+                    invoiceNumber: ''
+                });
+            }
+        }
+    }, [refundModal, patient, activeTab]);
 
     // Reports state
     const [reports, setReports] = useState({ type: 'daily', records: [] });
@@ -76,6 +148,12 @@ const BillingDashboard = ({ tab }) => {
         if (activeTab === 'refunds') fetchRefunds();
         if (activeTab === 'settings') loadSettings();
         if (activeTab === 'history' || activeTab === 'dashboard') fetchLogs();
+        
+        // Clear active patient profile context if we navigate away from patient tab
+        if (activeTab !== 'patient') {
+            setPatient(null);
+            setBilling(null);
+        }
     }, [activeTab]);
 
     // When invoices load for the reports tab, generate the report
@@ -199,7 +277,7 @@ const BillingDashboard = ({ tab }) => {
         billing.labReports.filter(l => selectedItems.labReports.includes(l._id)).forEach(l => total += (l.amount || l.price || 0));
         billing.pharmacyOrders.filter(p => selectedItems.pharmacyOrders.includes(p._id)).forEach(p => total += (p.totalAmount || 0));
         billing.facilityCharges.filter(f => selectedItems.facilityCharges.includes(f._id)).forEach(f => total += (f.totalAmount || 0));
-        billing.admissions.filter(a => selectedItems.admissions.includes(a._id)).forEach(a => total += (a.totalAmount || 0));
+        billing.admissions.filter(a => selectedItems.admissions.includes(a._id)).forEach(a => total += getAdmAmt(a));
         return total;
     };
 
@@ -210,7 +288,7 @@ const BillingDashboard = ({ tab }) => {
         billing.labReports.filter(l => l.paymentStatus !== 'PAID').forEach(l => total += (l.amount || l.price || 0));
         billing.pharmacyOrders.filter(p => p.paymentStatus !== 'Paid').forEach(p => total += (p.totalAmount || 0));
         billing.facilityCharges.filter(f => f.paymentStatus !== 'Paid').forEach(f => total += (f.totalAmount || 0));
-        billing.admissions.filter(a => a.paymentStatus !== 'Paid').forEach(a => total += (a.totalAmount || 0));
+        billing.admissions.filter(a => a.paymentStatus !== 'Paid').forEach(a => total += getAdmAmt(a));
         return total;
     };
 
@@ -273,7 +351,7 @@ const BillingDashboard = ({ tab }) => {
                 itemId: a._id,
                 name: `Admission - Ward: ${a.ward || 'General'} Bed: ${a.bedNumber || 'N/A'}`,
                 quantity: 1,
-                unitPrice: a.totalAmount || 0
+                unitPrice: getAdmAmt(a)
             });
         });
 
@@ -395,16 +473,20 @@ const BillingDashboard = ({ tab }) => {
         if (refundForm.amount <= 0 || !refundForm.reason) {
             return alert('Please enter a valid amount and reason.');
         }
+
+        const targetPatientId = refundForm.patientId || patient?._id;
+        const targetPatientName = refundForm.patientName || patient?.name;
+
+        if (!targetPatientId) {
+            alert('Please search and select a patient profile first before requesting a refund.');
+            return;
+        }
+
         setSubmittingRefund(true);
         try {
-            if (!patient?._id) {
-                alert('Please look up a patient profile first before requesting a refund.');
-                setSubmittingRefund(false);
-                return;
-            }
             const res = await billingAPI.requestRefund({
-                patientId: patient._id,
-                patientName: patient.name,
+                patientId: targetPatientId,
+                patientName: targetPatientName,
                 refundType: refundForm.type,
                 amount: refundForm.amount,
                 reason: refundForm.reason,
@@ -414,7 +496,16 @@ const BillingDashboard = ({ tab }) => {
             if (res.success) {
                 setSuccess('Refund request submitted successfully.');
                 setRefundModal(false);
-                setRefundForm({ type: 'Manual Refund', amount: 0, reason: '', itemId: '', invoiceNumber: '' });
+                setRefundForm({
+                    patientId: '',
+                    patientName: '',
+                    patientPhone: '',
+                    type: 'Manual Refund',
+                    amount: 0,
+                    reason: '',
+                    itemId: '',
+                    invoiceNumber: ''
+                });
                 fetchRefunds();
             }
         } catch (err) {
@@ -1281,7 +1372,7 @@ const BillingDashboard = ({ tab }) => {
                                                                 ))}
                                                                 <div className="breakdown-total-row">
                                                                     <span>Admission Total</span>
-                                                                    <strong>{fmt(a.totalAmount)}</strong>
+                                                                    <strong>{fmt(getAdmAmt(a))}</strong>
                                                                 </div>
                                                             </div>
                                                         )}
@@ -1293,7 +1384,7 @@ const BillingDashboard = ({ tab }) => {
                                                                 disabled={a.paymentStatus === 'Paid'}
                                                             />
                                                             <span style={{flex:1, fontSize:'13px', fontWeight:'500'}}>Include Consolidated Admission Fees in Invoice</span>
-                                                            <strong className="amount-val">{fmt(a.totalAmount)}</strong>
+                                                            <strong className="amount-val">{fmt(getAdmAmt(a))}</strong>
                                                         </label>
                                                     </div>
                                                 ))}
@@ -1489,8 +1580,8 @@ const BillingDashboard = ({ tab }) => {
 
                                             {/* IPD */}
                                             {(billing.admissions || []).length > 0 && (() => {
-                                                const total = (billing.admissions || []).reduce((s, a) => s + (a.totalAmount || 0), 0);
-                                                const paid  = (billing.admissions || []).filter(a => a.paymentStatus === 'Paid').reduce((s, a) => s + (a.totalAmount || 0), 0);
+                                                const total = (billing.admissions || []).reduce((s, a) => s + getAdmAmt(a), 0);
+                                                const paid  = (billing.admissions || []).filter(a => a.paymentStatus === 'Paid').reduce((s, a) => s + getAdmAmt(a), 0);
                                                 return (
                                                     <div className="cbill-dept-row cbill-admission">
                                                         <div className="cbill-dept-icon">🏥</div>
@@ -1502,7 +1593,7 @@ const BillingDashboard = ({ tab }) => {
                                                                     <div key={a._id} className="cbill-mini-row">
                                                                         <span>Ward: {a.ward} — Bed: {a.bedNumber} ({a.status})</span>
                                                                         <span className={a.paymentStatus === 'Paid' ? 'cbill-status-paid' : 'cbill-status-due'}>{a.paymentStatus === 'Paid' ? '✓ Paid' : '● Due'}</span>
-                                                                        <span>{fmt(a.totalAmount || 0)}</span>
+                                                                        <span>{fmt(getAdmAmt(a))}</span>
                                                                     </div>
                                                                 ))}
                                                             </div>
@@ -1524,7 +1615,7 @@ const BillingDashboard = ({ tab }) => {
                                                 ...(billing.labReports || []).map(l => l.amount || 0),
                                                 ...(billing.pharmacyOrders || []).map(p => p.totalAmount || 0),
                                                 ...(billing.facilityCharges || []).map(f => f.totalAmount || 0),
-                                                ...(billing.admissions || []).map(a => a.totalAmount || 0)
+                                                ...(billing.admissions || []).map(a => getAdmAmt(a))
                                             ].reduce((s, v) => s + v, 0);
 
                                             const paidTot = [
@@ -1532,7 +1623,7 @@ const BillingDashboard = ({ tab }) => {
                                                 ...(billing.labReports || []).filter(l => l.paymentStatus === 'PAID').map(l => l.amount || 0),
                                                 ...(billing.pharmacyOrders || []).filter(p => p.paymentStatus === 'Paid').map(p => p.totalAmount || 0),
                                                 ...(billing.facilityCharges || []).filter(f => f.paymentStatus === 'Paid').map(f => f.totalAmount || 0),
-                                                ...(billing.admissions || []).filter(a => a.paymentStatus === 'Paid').map(a => a.totalAmount || 0)
+                                                ...(billing.admissions || []).filter(a => a.paymentStatus === 'Paid').map(a => getAdmAmt(a))
                                             ].reduce((s, v) => s + v, 0);
 
                                             const dueTot = grandTot - paidTot;
@@ -1687,43 +1778,109 @@ const BillingDashboard = ({ tab }) => {
                 )}
 
                 {/* 6. Payment History / Receipt Logs */}
-                {activeTab === 'history' && (
-                    <div className="tab-pane-view">
-                        <div className="billing-section-box">
-                            <h3>Issued Payment Receipts</h3>
-                            <div className="table-responsive">
-                                <table>
-                                    <thead>
-                                        <tr>
-                                            <th>Receipt No</th>
-                                            <th>Invoice No</th>
-                                            <th>Patient Name</th>
-                                            <th>Amount Collected</th>
-                                            <th>Payment Method</th>
-                                            <th>Date Collected</th>
-                                            <th>Action</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        {invoices.map(inv => inv.payments.map(p => (
-                                            <tr key={p.receiptNumber}>
-                                                <td>{p.receiptNumber}</td>
-                                                <td>{inv.invoiceNumber}</td>
-                                                <td>{inv.patientName}</td>
-                                                <td style={{ fontWeight: 'bold' }}>{fmt(p.amount)}</td>
-                                                <td>{p.method}</td>
-                                                <td>{fmtDateTime(p.date)}</td>
-                                                <td>
-                                                    <button className="btn-print" onClick={() => exportReceiptPDF(inv, p)}><FiPrinter /> Print Receipt</button>
-                                                </td>
+                {activeTab === 'history' && (() => {
+                    const todayStart = new Date();
+                    todayStart.setHours(0, 0, 0, 0);
+
+                    const userPayments = invoices.flatMap(inv => 
+                        (inv.payments || []).map(p => ({ inv, p }))
+                    ).filter(({ p }) => {
+                        if (isReceptionist) {
+                            const collectedById = typeof p.collectedBy === 'object' ? p.collectedBy?._id : p.collectedBy;
+                            return String(collectedById) === String(user?._id);
+                        }
+                        return true;
+                    });
+
+                    const todayUserPayments = userPayments.filter(({ p }) => new Date(p.date) >= todayStart);
+
+                    const totalTransactions = todayUserPayments.length;
+                    const totalCollection = todayUserPayments.reduce((sum, { p }) => sum + p.amount, 0);
+                    const cashCollection = todayUserPayments.filter(({ p }) => p.method === 'Cash').reduce((sum, { p }) => sum + p.amount, 0);
+                    const upiCollection = todayUserPayments.filter(({ p }) => p.method === 'UPI' || p.method === 'UPI / QR').reduce((sum, { p }) => sum + p.amount, 0);
+                    const cardCollection = todayUserPayments.filter(({ p }) => p.method === 'Card').reduce((sum, { p }) => sum + p.amount, 0);
+
+                    const uniqueInvoiceIds = Array.from(new Set(todayUserPayments.map(({ inv }) => inv._id?.toString())));
+                    const uniqueInvoices = uniqueInvoiceIds.map(id => invoices.find(inv => inv._id?.toString() === id)).filter(Boolean);
+                    const pendingAmount = uniqueInvoices.reduce((sum, inv) => sum + (inv.outstandingAmount || 0), 0);
+
+                    return (
+                        <div className="tab-pane-view">
+                            {/* Daily Collection Summary Widget */}
+                            <div className="billing-section-box" style={{ marginBottom: '24px' }}>
+                                <h3>Daily Collection Summary (Today)</h3>
+                                <div className="billing-stats-grid" style={{ marginTop: '12px' }}>
+                                    <div className="stat-card">
+                                        <span className="stat-label">Total Transactions</span>
+                                        <h3 className="stat-val text-teal">{totalTransactions}</h3>
+                                    </div>
+                                    <div className="stat-card">
+                                        <span className="stat-label">Total Collection</span>
+                                        <h3 className="stat-val">{fmt(totalCollection)}</h3>
+                                    </div>
+                                    <div className="stat-card">
+                                        <span className="stat-label">Cash Collection</span>
+                                        <h3 className="stat-val text-indigo">{fmt(cashCollection)}</h3>
+                                    </div>
+                                    <div className="stat-card">
+                                        <span className="stat-label">UPI Collection</span>
+                                        <h3 className="stat-val text-purple">{fmt(upiCollection)}</h3>
+                                    </div>
+                                    <div className="stat-card">
+                                        <span className="stat-label">Card Collection</span>
+                                        <h3 className="stat-val text-cyan">{fmt(cardCollection)}</h3>
+                                    </div>
+                                    <div className="stat-card">
+                                        <span className="stat-label">Pending Invoice Amount</span>
+                                        <h3 className="stat-val text-rose">{fmt(pendingAmount)}</h3>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div className="billing-section-box">
+                                <h3>{isReceptionist ? 'My Issued Payment Receipts' : 'Issued Payment Receipts'}</h3>
+                                <div className="table-responsive">
+                                    <table>
+                                        <thead>
+                                            <tr>
+                                                <th>Receipt No</th>
+                                                <th>Invoice No</th>
+                                                <th>Patient Name</th>
+                                                <th>Amount Collected</th>
+                                                <th>Payment Method</th>
+                                                <th>Date Collected</th>
+                                                <th>Action</th>
                                             </tr>
-                                        ))).flat()}
-                                    </tbody>
-                                </table>
+                                        </thead>
+                                        <tbody>
+                                            {userPayments.length === 0 ? (
+                                                <tr>
+                                                    <td colSpan="7" style={{ textAlign: 'center', color: '#64748b', padding: '20px' }}>
+                                                        No payment receipts found.
+                                                    </td>
+                                                </tr>
+                                            ) : (
+                                                userPayments.map(({ inv, p }) => (
+                                                    <tr key={p.receiptNumber}>
+                                                        <td>{p.receiptNumber}</td>
+                                                        <td>{inv.invoiceNumber}</td>
+                                                        <td>{inv.patientName}</td>
+                                                        <td style={{ fontWeight: 'bold' }}>{fmt(p.amount)}</td>
+                                                        <td>{p.method}</td>
+                                                        <td>{fmtDateTime(p.date)}</td>
+                                                        <td>
+                                                            <button className="btn-print" onClick={() => exportReceiptPDF(inv, p)}><FiPrinter /> Print Receipt</button>
+                                                        </td>
+                                                    </tr>
+                                                ))
+                                            )}
+                                        </tbody>
+                                    </table>
+                                </div>
                             </div>
                         </div>
-                    </div>
-                )}
+                    );
+                })()}
 
                 {/* 7. Refunds */}
                 {activeTab === 'refunds' && (
@@ -1760,7 +1917,7 @@ const BillingDashboard = ({ tab }) => {
                                                 <td>{ref.requestedByName}</td>
                                                 <td>{fmtDate(ref.createdAt)}</td>
                                                 <td>
-                                                    {ref.status === 'Refund Pending' && (
+                                                    {ref.status === 'Refund Pending' && !isReceptionist && (
                                                         <button className="btn-collect" onClick={() => handleApproveRefund(ref._id)}>Approve & Settle</button>
                                                     )}
                                                     {ref.status === 'Refunded' && (
@@ -1987,6 +2144,147 @@ const BillingDashboard = ({ tab }) => {
                     <div className="modal-content" style={{ maxWidth: '450px' }}>
                         <h3>Request Billing Refund</h3>
                         <form onSubmit={handleRequestRefund}>
+                            {!selectedModalPatient ? (
+                                <div className="form-group" style={{ marginBottom: '16px', position: 'relative' }}>
+                                    <label className="staff-label">Search Patient (Name or Phone) <span style={{ color: '#ef4444' }}>*</span></label>
+                                    <input
+                                        type="text"
+                                        placeholder="Type name or phone number..."
+                                        value={modalSearchQuery}
+                                        onChange={async (e) => {
+                                            const val = e.target.value;
+                                            setModalSearchQuery(val);
+                                            if (val.length > 2) {
+                                                try {
+                                                    const res = await receptionAPI.searchPatients(val);
+                                                    if (res.success) setModalSearchResults(res.patients || []);
+                                                } catch (err) {
+                                                    console.error('Error searching patients:', err);
+                                                }
+                                            } else {
+                                                setModalSearchResults([]);
+                                            }
+                                        }}
+                                        className="staff-input"
+                                        required
+                                    />
+                                    {modalSearchResults.length > 0 && (
+                                        <div style={{
+                                            position: 'absolute',
+                                            top: '100%',
+                                            left: 0,
+                                            right: 0,
+                                            backgroundColor: '#fff',
+                                            border: '1.5px solid #6366f1',
+                                            borderRadius: '10px',
+                                            boxShadow: '0 8px 24px rgba(99,102,241,0.18)',
+                                            zIndex: 99999,
+                                            maxHeight: '220px',
+                                            overflowY: 'auto',
+                                            marginTop: '4px'
+                                        }}>
+                                            <div style={{ padding: '7px 12px 4px', fontSize: '0.7rem', color: '#6366f1', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em', borderBottom: '1px solid #e0e7ff' }}>
+                                                🔍 {modalSearchResults.length} patient{modalSearchResults.length !== 1 ? 's' : ''} found
+                                            </div>
+                                            {modalSearchResults.map((pat, idx) => (
+                                                <div
+                                                    key={pat._id}
+                                                    onClick={() => {
+                                                        setSelectedModalPatient(pat);
+                                                        setModalSearchQuery('');
+                                                        setModalSearchResults([]);
+                                                        setRefundForm(prev => ({
+                                                            ...prev,
+                                                            patientId: pat._id,
+                                                            patientName: pat.name,
+                                                            patientPhone: pat.phone || ''
+                                                        }));
+                                                    }}
+                                                    style={{
+                                                        padding: '10px 12px',
+                                                        cursor: 'pointer',
+                                                        borderBottom: idx < modalSearchResults.length - 1 ? '1px solid #f1f5f9' : 'none',
+                                                        display: 'flex',
+                                                        alignItems: 'center',
+                                                        gap: '10px',
+                                                        transition: 'background 0.15s'
+                                                    }}
+                                                    onMouseEnter={e => { e.currentTarget.style.backgroundColor = '#eff6ff'; }}
+                                                    onMouseLeave={e => { e.currentTarget.style.backgroundColor = '#fff'; }}
+                                                >
+                                                    <div style={{
+                                                        width: '32px', height: '32px', borderRadius: '50%',
+                                                        background: 'linear-gradient(135deg, #6366f1, #8b5cf6)',
+                                                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                                        color: '#fff', fontWeight: 800, fontSize: '0.85rem', flexShrink: 0
+                                                    }}>
+                                                        {(pat.name || 'P')[0].toUpperCase()}
+                                                    </div>
+                                                    <div style={{ flex: 1, minWidth: 0 }}>
+                                                        <div style={{ fontWeight: 700, fontSize: '0.88rem', color: '#1e293b', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{pat.name}</div>
+                                                        <div style={{ fontSize: '0.73rem', color: '#64748b' }}>
+                                                            📱 {pat.phone || '—'} &nbsp;•&nbsp; MRN: {pat.patientId || 'N/A'}
+                                                        </div>
+                                                    </div>
+                                                    <div style={{ fontSize: '0.7rem', color: '#6366f1', fontWeight: 700, whiteSpace: 'nowrap' }}>✓ Select</div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    )}
+
+                                </div>
+                            ) : (
+                                <div className="form-group" style={{ marginBottom: '16px' }}>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
+                                        <label className="staff-label" style={{ marginBottom: 0 }}>Selected Patient</label>
+                                        {!patient && (
+                                            <button
+                                                type="button"
+                                                onClick={() => {
+                                                    setSelectedModalPatient(null);
+                                                    setRefundForm(p => ({ ...p, patientId: '', patientName: '', patientPhone: '' }));
+                                                }}
+                                                style={{
+                                                    background: 'none',
+                                                    border: 'none',
+                                                    color: '#ef4444',
+                                                    fontSize: '11px',
+                                                    fontWeight: '600',
+                                                    cursor: 'pointer',
+                                                    padding: 0
+                                                }}
+                                            >
+                                                Change Patient
+                                            </button>
+                                        )}
+                                    </div>
+                                    <div style={{
+                                        padding: '10px 12px',
+                                        backgroundColor: '#f8fafc',
+                                        border: '1px solid #e2e8f0',
+                                        borderRadius: '8px',
+                                        display: 'flex',
+                                        justifyContent: 'space-between',
+                                        alignItems: 'center'
+                                    }}>
+                                        <div>
+                                            <strong style={{ display: 'block', fontSize: '14px', color: '#1e293b' }}>{selectedModalPatient.name}</strong>
+                                            <span style={{ fontSize: '12px', color: '#64748b' }}>Phone: {selectedModalPatient.phone || '—'}</span>
+                                        </div>
+                                        <span style={{
+                                            fontSize: '11px',
+                                            padding: '2px 8px',
+                                            backgroundColor: '#e0f2fe',
+                                            color: '#0369a1',
+                                            borderRadius: '12px',
+                                            fontWeight: '600'
+                                        }}>
+                                            MRN: {selectedModalPatient.mrn || selectedModalPatient.patientId || 'N/A'}
+                                        </span>
+                                    </div>
+                                </div>
+                            )}
+
                             <div className="form-group" style={{ marginBottom: '16px' }}>
                                 <label className="staff-label">Refund Category</label>
                                 <select

@@ -1,16 +1,34 @@
 const express = require('express');
 const router = express.Router();
-const ClinicalVisit = require('../models/clinicalVisit.model');
 const { verifyToken } = require('../middleware/auth.middleware');
-const LabReport = require('../models/labReport.model');
-const PharmacyOrder = require('../models/pharmacyOrder.model');
-const Inventory = require('../models/inventory.model');
-const Appointment = require('../models/appointment.model');
+const { resolveTenant } = require('../middleware/tenantMiddleware');
+const { getTenantModels } = require('../db/tenantModels');
+
+const getModels = (req) => {
+    if (req.tenantDb) {
+        const m = getTenantModels(req.tenantDb);
+        return {
+            ClinicalVisit: m.ClinicalVisit,
+            LabReport: m.LabReport,
+            PharmacyOrder: m.PharmacyOrder,
+            Inventory: m.Inventory,
+            Appointment: m.Appointment
+        };
+    }
+    return {
+        ClinicalVisit: require('../models/clinicalVisit.model'),
+        LabReport: require('../models/labReport.model'),
+        PharmacyOrder: require('../models/pharmacyOrder.model'),
+        Inventory: require('../models/inventory.model'),
+        Appointment: require('../models/appointment.model')
+    };
+};
 
 // 1. NURSE: Create Visit & Add Vitals
-router.post('/intake', verifyToken, async (req, res) => {
+router.post('/intake', verifyToken, resolveTenant, async (req, res) => {
     try {
         const { patientId, vitals, intervalHistory, chiefComplaint } = req.body;
+        const { ClinicalVisit } = getModels(req);
 
         const visit = new ClinicalVisit({
             patientId,
@@ -29,13 +47,15 @@ router.post('/intake', verifyToken, async (req, res) => {
         await visit.save();
         res.json({ success: true, data: visit });
     } catch (error) {
+        console.error('Intake Error:', error);
         res.status(500).json({ success: false, message: 'An internal error occurred' });
     }
 });
 
 // 2. DOCTOR: Get Patient History
-router.get('/history/:patientId', verifyToken, async (req, res) => {
+router.get('/history/:patientId', verifyToken, resolveTenant, async (req, res) => {
     try {
+        const { ClinicalVisit } = getModels(req);
         // RLS: scope by hospitalId so cross-hospital data never leaks
         const filter = { patientId: req.params.patientId };
         if (req.user.hospitalId) filter.hospitalId = req.user.hospitalId;
@@ -47,14 +67,16 @@ router.get('/history/:patientId', verifyToken, async (req, res) => {
 
         res.json({ success: true, history });   // key: history (was: data)
     } catch (error) {
+        console.error('History Fetch Error:', error);
         res.status(500).json({ success: false, message: 'An internal error occurred' });
     }
 });
 
 // 3. DOCTOR: Finalize Diagnosis
-router.post('/diagnose/:visitId', verifyToken, async (req, res) => {
+router.post('/diagnose/:visitId', verifyToken, resolveTenant, async (req, res) => {
     try {
         const { diagnosis, prescription, labTests, notes } = req.body;
+        const { ClinicalVisit, LabReport, PharmacyOrder, Inventory, Appointment } = getModels(req);
 
         // RLS: validate the visit belongs to this hospital before updating
         const visitFilter = { _id: req.params.visitId };

@@ -91,6 +91,7 @@ router.post('/', verifyAdmissionAccess, async (req, res) => {
                 totalAmount: Number(f.pricePerDay) * Number(f.days),
             })),
             totalAmount,
+            dailyWardCharge: Number(req.body.dailyWardCharge) || 0,
             status: (ward && bedNumber) ? 'Admitted' : 'Pending Allocation',
             notes,
         });
@@ -183,6 +184,7 @@ router.put('/:id', verifyAdmissionAccess, async (req, res) => {
         const targetWard = ward !== undefined ? ward : currentAdmission.ward;
         const targetBed = bedNumber !== undefined ? bedNumber : currentAdmission.bedNumber;
 
+        if (req.body.dailyWardCharge !== undefined) updateFields.dailyWardCharge = Number(req.body.dailyWardCharge) || 0;
         if (ward !== undefined) updateFields.ward = ward;
         if (bedNumber !== undefined) updateFields.bedNumber = bedNumber;
 
@@ -256,16 +258,32 @@ router.put('/:id/discharge', verifyAdmissionAccess, async (req, res) => {
             User: require('../models/user.model')
         };
 
+        const patientObj = await models.User.findById(patientId).select('patientId mrn name phone');
+        const patientIdStr = patientObj ? (patientObj.patientId || patientObj.mrn) : '';
+
         const [appointments, labReports, pharmacyOrders, facilityCharges, invoices] = await Promise.all([
-            models.Appointment.find({ patientId, paymentStatus: 'Pending', hospitalId }).lean(),
+            models.Appointment.find({
+                $or: [
+                    { userId: patientId },
+                    ...(patientIdStr ? [{ patientId: patientIdStr }] : [])
+                ],
+                paymentStatus: 'Pending',
+                hospitalId
+            }).lean(),
             models.LabReport.find({
-                patientId,
+                $or: [
+                    { userId: patientId },
+                    ...(patientIdStr ? [{ patientId: patientIdStr }] : [])
+                ],
                 status: { $in: ['Sample Collected', 'In Testing', 'Report Ready', 'Completed'] },
                 paymentStatus: { $in: ['PENDING', 'Pending'] },
                 hospitalId
             }).lean(),
             models.PharmacyOrder.find({
-                patientId,
+                $or: [
+                    { userId: patientId },
+                    ...(patientIdStr ? [{ patientId: patientIdStr }] : [])
+                ],
                 orderStatus: 'Completed',
                 paymentStatus: { $in: ['Pending', 'Unpaid'] },
                 hospitalId

@@ -45,6 +45,13 @@ const ReportsFilesTab = ({ appointment, labReports = [], onRecommendAdmission, o
             mimetype: r.mimetype,
             source: 'clinic-patient',
         })),
+        ...(appointment?.userId?.pastReports || []).map(r => ({
+            name: r.name,
+            url: r.url || r.fileUrl || (r.filename ? `${BASE}/uploads/patient-reports/${encodeURIComponent(r.filename)}` : null),
+            uploadedAt: r.uploadedAt,
+            mimetype: r.mimetype,
+            source: 'past-report',
+        })),
     ];
 
     const isPDF = (mimetype) => mimetype === 'application/pdf' || (typeof mimetype === 'string' && mimetype.endsWith('pdf'));
@@ -70,7 +77,13 @@ const ReportsFilesTab = ({ appointment, labReports = [], onRecommendAdmission, o
                                     {f.name || 'Unnamed file'}
                                 </div>
                                 <div style={{ fontSize: '11px', color: '#64748b', marginTop: '2px' }}>
-                                    {f.type === 'lab_report' ? '🔬 Lab Report' : f.source === 'clinic-patient' ? '📋 Patient Report' : '📝 Prescription'}
+                                    {f.type === 'lab_report'
+                                        ? '🔬 Lab Report'
+                                        : f.source === 'clinic-patient'
+                                        ? '📋 Patient Report'
+                                        : f.source === 'past-report'
+                                        ? '📋 Previous Hospital Report'
+                                        : '📝 Prescription'}
                                     {f.uploadedAt && ` · ${new Date(f.uploadedAt).toLocaleDateString('en-IN')}`}
                                 </div>
                             </div>
@@ -240,6 +253,7 @@ const DoctorPatientDetails = () => {
     const [saving, setSaving] = useState(false);
     const [catalogTests, setCatalogTests] = useState([]);
     const [catalogMedicines, setCatalogMedicines] = useState([]);
+    // Medicines are now loaded from the backend catalog (persisted to DB)
     const [dynamicLibrary, setDynamicLibrary] = useState(null);
     const [hospitalDepartments, setHospitalDepartments] = useState([]);
     const [isLocked, setIsLocked] = useState(false);
@@ -261,6 +275,7 @@ const DoctorPatientDetails = () => {
 
     // Patient Intake Profile (Left Panel - Editable by Doctor)
     const [intakeData, setIntakeData] = useState({});
+    const [requestReportFollowUp, setRequestReportFollowUp] = useState(false);
 
     // Tab Scrolling Reference
     const tabsRef = useRef(null);
@@ -300,9 +315,10 @@ const DoctorPatientDetails = () => {
                 if (res.success) {
                     setAppointment(res.appointment);
                     setIntakeData(res.appointment.userId?.fertilityProfile || {});
+                    setRequestReportFollowUp(res.appointment.requestReportFollowUp || false);
                     
-                    // DO NOT lock the consultation session (Task 5 requirement)
-                    setIsLocked(false);
+                    // Lock the consultation session if the appointment is completed or cancelled
+                    setIsLocked(res.appointment.status === 'completed' || res.appointment.status === 'cancelled');
 
                     if (res.appointment.userId?._id) {
                         const histRes = await doctorAPI.getPatientHistory(res.appointment.userId._id);
@@ -385,6 +401,8 @@ const DoctorPatientDetails = () => {
         setIntakeData(prev => ({ ...prev, [name]: value }));
     };
 
+
+
     const handleSessionChange = (e) => {
         if (isLocked) return;
         setSessionData(prev => ({ ...prev, [e.target.name]: e.target.value }));
@@ -415,7 +433,8 @@ const DoctorPatientDetails = () => {
                 status: 'completed',
                 diagnosis: sessionData.diagnosis,
                 notes: sessionData.notes,
-                labTests: sessionData.labTests.split(',').map(s => s.trim()).filter(Boolean),
+                requestReportFollowUp: requestReportFollowUp,
+                labTests: sessionData.labTests.split(/(?:,\s*)+(?![^(]*\))/).map(s => s.trim()).filter(Boolean),
                 pharmacy: (sessionData.medicines || []).filter(m => m.medicineName?.trim()).map(m => ({
                     medicineName: m.medicineName?.trim() || '',
                     saltName: m.saltName?.trim() || '',
@@ -425,7 +444,9 @@ const DoctorPatientDetails = () => {
             };
             await doctorAPI.updateSession(appointmentId, payload);
 
-            // 3. Generate Prescription PDF automatically
+
+
+            // 4. Generate Prescription PDF automatically
             generatePrescriptionPDF();
 
             alert("✅ Session saved & prescription generated!");
@@ -656,7 +677,7 @@ const DoctorPatientDetails = () => {
 
         // Lab Tests
         const labItems = sessionData.labTests
-            ? sessionData.labTests.split(',').map(t => t.trim()).filter(Boolean)
+            ? sessionData.labTests.split(/(?:,\s*)+(?![^(]*\))/).map(t => t.trim()).filter(Boolean)
             : (appointment?.labTests || []);
 
         doc.setFontSize(11); doc.setFont('helvetica', 'bold'); doc.setTextColor(33, 37, 41);
@@ -781,8 +802,33 @@ const DoctorPatientDetails = () => {
         );
     }
 
+    const calculateAge = (dobString) => {
+        if (!dobString) return '';
+        try {
+            const dobDate = new Date(dobString);
+            if (isNaN(dobDate.getTime())) return '';
+            const diffMs = Date.now() - dobDate.getTime();
+            const ageDate = new Date(diffMs); 
+            return Math.abs(ageDate.getUTCFullYear() - 1970);
+        } catch (e) {
+            return '';
+        }
+    };
+
     const patient = appointment.userId || {};
     const profile = patient.fertilityProfile || intakeData;
+
+    const effectiveAge = profile.age || intakeData.age || (patient.dob ? calculateAge(patient.dob) : '');
+    const effectiveGender = profile.gender || intakeData.gender || patient.gender || '';
+    const effectiveBloodGroup = profile.bloodGroup || intakeData.bloodGroup || patient.bloodGroup || '';
+    const effectiveAddress = patient.address || profile.address || intakeData.address || patient.city || '';
+
+    const effectiveHeight = profile.height || intakeData.height || appointment.vitals?.height || '';
+    const effectiveWeight = profile.weight || intakeData.weight || appointment.vitals?.weight || '';
+    const effectiveBMI = profile.bmi || intakeData.bmi || appointment.vitals?.bmi || '';
+
+    const effectiveChiefComplaint = profile.chiefComplaint || intakeData.chiefComplaint || appointment.symptoms || '';
+    const effectiveReasonForVisit = profile.reasonForVisit || intakeData.reasonForVisit || appointment.notes || '';
 
     const tabs = [
         { id: 'overview', label: 'Overview', icon: '📋' },
@@ -796,7 +842,7 @@ const DoctorPatientDetails = () => {
         let allowedDepts = hospitalDepartments.length > 0 ? hospitalDepartments : Object.keys(dynamicLibrary);
         
         allowedDepts.forEach(dept => {
-            if (dynamicLibrary[dept]) {
+            if (dynamicLibrary[dept] && typeof dynamicLibrary[dept] === 'object' && !Array.isArray(dynamicLibrary[dept])) {
                 Object.keys(dynamicLibrary[dept]).forEach((catKey, i) => {
                     dynamicTabs.push({ 
                         id: `dyn_${dept.replace(/\s/g, '')}_${i}`, 
@@ -829,9 +875,9 @@ const DoctorPatientDetails = () => {
                             <div className="dpd-patient-tags">
                                 <span className="dpd-tag tag-mrn">MRN: {patient.patientId || 'N/A'}</span>
                                 <span className="dpd-tag tag-phone">📱 {patient.phone || '-'}</span>
-                                {profile.age && <span className="dpd-tag tag-age">Age: {profile.age}</span>}
-                                {profile.gender && <span className="dpd-tag tag-gender">{profile.gender}</span>}
-                                {profile.bloodGroup && <span className="dpd-tag tag-blood">🩸 {profile.bloodGroup}</span>}
+                                {effectiveAge && <span className="dpd-tag tag-age">Age: {effectiveAge}</span>}
+                                {effectiveGender && <span className="dpd-tag tag-gender">{effectiveGender}</span>}
+                                {effectiveBloodGroup && <span className="dpd-tag tag-blood">🩸 {effectiveBloodGroup}</span>}
                             </div>
                         </div>
                     </div>
@@ -896,39 +942,39 @@ const DoctorPatientDetails = () => {
                                 </div>
                                 <div className="dpd-ov-card">
                                     <span className="dpd-ov-label">Age</span>
-                                    <span className="dpd-ov-value">{profile.age || intakeData.age || '-'}</span>
+                                    <span className="dpd-ov-value">{effectiveAge || '-'}</span>
                                 </div>
                                 <div className="dpd-ov-card">
                                     <span className="dpd-ov-label">Gender</span>
-                                    <span className="dpd-ov-value">{profile.gender || intakeData.gender || '-'}</span>
+                                    <span className="dpd-ov-value">{effectiveGender || '-'}</span>
                                 </div>
                                 <div className="dpd-ov-card">
                                     <span className="dpd-ov-label">Blood Group</span>
-                                    <span className="dpd-ov-value">{profile.bloodGroup || intakeData.bloodGroup || '-'}</span>
+                                    <span className="dpd-ov-value">{effectiveBloodGroup || '-'}</span>
                                 </div>
                                 <div className="dpd-ov-card">
                                     <span className="dpd-ov-label">Height</span>
-                                    <span className="dpd-ov-value">{profile.height || intakeData.height || '-'} cm</span>
+                                    <span className="dpd-ov-value">{effectiveHeight ? `${effectiveHeight} cm` : '-'}</span>
                                 </div>
                                 <div className="dpd-ov-card">
                                     <span className="dpd-ov-label">Weight</span>
-                                    <span className="dpd-ov-value">{profile.weight || intakeData.weight || '-'} kg</span>
+                                    <span className="dpd-ov-value">{effectiveWeight ? `${effectiveWeight} kg` : '-'}</span>
                                 </div>
                                 <div className="dpd-ov-card">
                                     <span className="dpd-ov-label">BMI</span>
-                                    <span className="dpd-ov-value">{profile.bmi || intakeData.bmi || '-'}</span>
+                                    <span className="dpd-ov-value">{effectiveBMI || '-'}</span>
                                 </div>
                                 <div className="dpd-ov-card">
                                     <span className="dpd-ov-label">Address</span>
-                                    <span className="dpd-ov-value">{patient.address || profile.address || '-'}</span>
+                                    <span className="dpd-ov-value">{effectiveAddress || '-'}</span>
                                 </div>
                                 <div className="dpd-ov-card">
                                     <span className="dpd-ov-label">Chief Complaint</span>
-                                    <span className="dpd-ov-value">{profile.chiefComplaint || intakeData.chiefComplaint || '-'}</span>
+                                    <span className="dpd-ov-value">{effectiveChiefComplaint || '-'}</span>
                                 </div>
                                 <div className="dpd-ov-card">
                                     <span className="dpd-ov-label">Reason for Visit</span>
-                                    <span className="dpd-ov-value">{profile.reasonForVisit || intakeData.reasonForVisit || '-'}</span>
+                                    <span className="dpd-ov-value">{effectiveReasonForVisit || '-'}</span>
                                 </div>
                             </div>
 
@@ -993,28 +1039,34 @@ const DoctorPatientDetails = () => {
                                             {/* Diagnosis */}
                                             <div className="dpd-hist-diagnosis">
                                                 <strong>Diagnosis:</strong>{' '}
-                                                {(h.doctorConsultation?.diagnosis?.length > 0
+                                                {h.diagnosis || (h.doctorConsultation?.diagnosis?.length > 0
                                                     ? h.doctorConsultation.diagnosis.join(', ')
                                                     : null) || 'No diagnosis recorded'}
                                             </div>
                                             {/* Notes */}
-                                            {h.doctorConsultation?.clinicalNotes && (
+                                            {(h.doctorNotes || h.notes || h.doctorConsultation?.clinicalNotes) && (
                                                 <div className="dpd-hist-notes">
-                                                    <strong>Notes:</strong> {h.doctorConsultation.clinicalNotes}
+                                                    <strong>Notes:</strong> {h.doctorNotes || h.notes || h.doctorConsultation?.clinicalNotes}
                                                 </div>
                                             )}
                                             {/* Prescription / Medicines */}
-                                            {h.doctorConsultation?.prescription?.length > 0 && (
+                                            {(h.pharmacy?.length > 0 || h.doctorConsultation?.prescription?.length > 0) && (
                                                 <div className="dpd-hist-notes">
                                                     <strong>💊 Medicines:</strong>{' '}
-                                                    {h.doctorConsultation.prescription.map(p => `${p.medicine} (${p.dosage}, ${p.duration})`).join(' · ')}
+                                                    {h.pharmacy?.length > 0 
+                                                        ? h.pharmacy.map(p => `${p.medicineName} (${p.frequency || ''}, ${p.duration || ''})`).join(' · ')
+                                                        : h.doctorConsultation.prescription.map(p => `${p.medicine} (${p.dosage}, ${p.duration})`).join(' · ')
+                                                    }
                                                 </div>
                                             )}
                                             {/* Lab Tests */}
-                                            {h.doctorConsultation?.labTests?.length > 0 && (
+                                            {(h.labTests?.length > 0 || h.doctorConsultation?.labTests?.length > 0) && (
                                                 <div className="dpd-hist-notes">
                                                     <strong>🧪 Lab Tests:</strong>{' '}
-                                                    {h.doctorConsultation.labTests.join(', ')}
+                                                    {h.labTests?.length > 0
+                                                        ? h.labTests.join(', ')
+                                                        : h.doctorConsultation.labTests.join(', ')
+                                                    }
                                                 </div>
                                             )}
                                             {h._id === appointmentId && <span className="dpd-current-badge">📌 Current Session</span>}
@@ -1139,7 +1191,9 @@ const DoctorPatientDetails = () => {
                                     {viewingPastSession.pharmacy?.length > 0 ? (
                                         <ul style={{ margin: 0, paddingLeft: '20px' }}>
                                             {viewingPastSession.pharmacy.map((p, i) => (
-                                                <li key={i}><strong>{p.medicineName}</strong></li>
+                                                <li key={i}>
+                                                    <strong>{p.medicineName}</strong> {p.saltName && `(${p.saltName})`} — {p.frequency || p.dose || ''} for {p.duration || p.days || ''}
+                                                </li>
                                             ))}
                                         </ul>
                                     ) : <em style={{ color: '#94a3b8' }}>No prescription recorded</em>}
@@ -1162,7 +1216,12 @@ const DoctorPatientDetails = () => {
                                     setSessionData({
                                         diagnosis: viewingPastSession.diagnosis || '',
                                         notes: viewingPastSession.doctorNotes || '',
-                                        prescription: viewingPastSession.pharmacy?.map(p => p.medicineName).join('\n') || '',
+                                        medicines: (viewingPastSession.pharmacy || []).map(p => ({
+                                            medicineName: p.medicineName || '',
+                                            saltName: p.saltName || '',
+                                            dose: p.frequency || p.dose || '',
+                                            days: p.duration || p.days || ''
+                                        })),
                                         labTests: (viewingPastSession.labTests || []).join(', ')
                                     });
                                     setViewingPastSession(null);
@@ -1254,6 +1313,7 @@ const DoctorPatientDetails = () => {
                                                 <div style={{ marginBottom: '14px' }}>
                                                     <div style={{ fontSize: '11px', fontWeight: '700', color: '#64748b', marginBottom: '6px', textTransform: 'uppercase', letterSpacing: '0.03em' }}>Quick-add from inventory:</div>
                                                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                                                        {/* Pharmacy inventory items */}
                                                         {catalogMedicines.map(med => {
                                                             const isIncluded = sessionData.medicines.some(m => m.medicineName === med.name);
                                                             return (
@@ -1377,14 +1437,14 @@ const DoctorPatientDetails = () => {
                                             {catalogTests.length > 0 && (
                                                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: '8px', marginBottom: '14px' }}>
                                                     {catalogTests.filter(t => t.isActive).map(test => {
-                                                        const isChecked = sessionData.labTests.split(', ').includes(test.name);
+                                                        const isChecked = sessionData.labTests.split(/(?:,\s*)+(?![^(]*\))/).map(s => s.trim()).includes(test.name);
                                                         return (
                                                             <label key={test._id} style={{ display: 'flex', alignItems: 'flex-start', gap: '8px', fontSize: '12px', cursor: 'pointer', padding: '10px', border: '1px solid #e2e8f0', borderRadius: '8px', background: isChecked ? '#eff6ff' : '#fafafa', borderColor: isChecked ? '#93c5fd' : '#e2e8f0', transition: 'all 0.15s' }}>
                                                                 <input
                                                                     type="checkbox"
                                                                     checked={isChecked}
                                                                     onChange={(e) => {
-                                                                        let currentTests = sessionData.labTests ? sessionData.labTests.split(', ') : [];
+                                                                        let currentTests = sessionData.labTests ? sessionData.labTests.split(/(?:,\s*)+(?![^(]*\))/).map(s => s.trim()).filter(Boolean) : [];
                                                                         if (e.target.checked) {
                                                                             currentTests.push(test.name);
                                                                         } else {
@@ -1418,6 +1478,59 @@ const DoctorPatientDetails = () => {
                                 </div>
                             </div>
                         </div>
+
+                        <div className="dpd-reschedule-option" style={{ 
+                            padding: '16px 20px', 
+                            borderTop: '1px solid #e2e8f0', 
+                            background: requestReportFollowUp ? 'linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%)' : '#f8fafc',
+                            borderLeft: requestReportFollowUp ? '4px solid #22c55e' : '4px solid transparent',
+                            transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '12px'
+                        }}>
+                            <label style={{ 
+                                display: 'flex', 
+                                alignItems: 'center', 
+                                gap: '10px', 
+                                cursor: 'pointer',
+                                width: '100%',
+                                userSelect: 'none'
+                            }}>
+                                <input
+                                    type="checkbox"
+                                    checked={requestReportFollowUp}
+                                    disabled={isLocked}
+                                    onChange={(e) => setRequestReportFollowUp(e.target.checked)}
+                                    style={{ 
+                                        width: '18px', 
+                                        height: '18px', 
+                                        cursor: 'pointer',
+                                        accentColor: '#16a34a',
+                                        transition: 'transform 0.15s ease'
+                                    }}
+                                    className="dpd-reschedule-checkbox"
+                                />
+                                <div style={{ display: 'flex', flexDirection: 'column' }}>
+                                    <span style={{ 
+                                        fontSize: '14px', 
+                                        fontWeight: '700', 
+                                        color: requestReportFollowUp ? '#15803d' : '#1e293b',
+                                        transition: 'color 0.3s ease'
+                                    }}>
+                                        📅 Reschedule for Report Review
+                                    </span>
+                                    <span style={{ 
+                                        fontSize: '11px', 
+                                        color: requestReportFollowUp ? '#166534' : '#64748b',
+                                        marginTop: '2px'
+                                    }}>
+                                        Flag this patient to be rescheduled by the receptionist once reports are generated.
+                                    </span>
+                                </div>
+                            </label>
+                        </div>
+
 
                         <div className="dpd-right-footer">
                             {!isLocked ? (

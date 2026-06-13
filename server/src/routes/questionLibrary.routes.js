@@ -19,8 +19,19 @@ router.get('/', verifyToken, async (req, res) => {
             library = await QuestionLibrary.findOne({ hospitalId: null }).sort({ version: -1 });
         }
 
-        if (!library) {
-            library = { data: {} };
+        const defaultDepts = { "General": {}, "Orthopedics": {}, "ENT": {} };
+        let libraryDataObj = {};
+        if (library && library.data) {
+            libraryDataObj = library.data;
+        }
+        const mergedData = { ...defaultDepts, ...libraryDataObj };
+
+        let resultLibrary = null;
+        if (library) {
+            resultLibrary = library.toObject();
+            resultLibrary.data = mergedData;
+        } else {
+            resultLibrary = { data: mergedData };
         }
 
         let allowedDepartments = null; // null means all allowed (super/central admin)
@@ -33,7 +44,7 @@ router.get('/', verifyToken, async (req, res) => {
             }
         }
 
-        res.json({ success: true, data: library, allowedDepartments });
+        res.json({ success: true, data: resultLibrary, allowedDepartments });
     } catch (error) {
         res.status(500).json({ success: false, message: 'An internal error occurred' });
     }
@@ -47,13 +58,16 @@ router.post('/', verifyAdminOrSuperAdmin, async (req, res) => {
 
         if (!data) return res.status(400).json({ success: false, message: 'Library data is required' });
 
+        const defaultDepts = { "General": {}, "Orthopedics": {}, "ENT": {} };
+        const mergedData = { ...defaultDepts, ...data };
+
         const latestLibrary = await QuestionLibrary.findOne({ hospitalId }).sort({ version: -1 });
         let newVersion = 1;
         if (latestLibrary) {
             newVersion = latestLibrary.version + 1;
         }
 
-        const library = new QuestionLibrary({ data, version: newVersion, hospitalId });
+        const library = new QuestionLibrary({ data: mergedData, version: newVersion, hospitalId });
         await library.save();
 
         res.status(201).json({ success: true, message: 'Question Library updated successfully', data: library });

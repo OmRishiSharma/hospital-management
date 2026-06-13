@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { adminAPI, receptionAPI } from '../../utils/api';
+import socket from '../../utils/socket';
 import './AdminMainDashboard.css';
 
 const AdminMainDashboard = () => {
@@ -20,8 +21,30 @@ const AdminMainDashboard = () => {
 
     useEffect(() => {
         fetchStats();
-        const interval = setInterval(fetchStats, 60000);
-        return () => clearInterval(interval);
+
+        socket.on('appointment_created', fetchStats);
+        socket.on('appointment_updated', fetchStats);
+        socket.on('patient_status_changed', fetchStats);
+        socket.on('admission_created', fetchStats);
+        socket.on('admission_updated', fetchStats);
+        socket.on('admission_discharged', fetchStats);
+        socket.on('invoice_generated', fetchStats);
+        socket.on('payment_received', fetchStats);
+        socket.on('invoice_paid', fetchStats);
+        socket.on('refund_processed', fetchStats);
+
+        return () => {
+            socket.off('appointment_created', fetchStats);
+            socket.off('appointment_updated', fetchStats);
+            socket.off('patient_status_changed', fetchStats);
+            socket.off('admission_created', fetchStats);
+            socket.off('admission_updated', fetchStats);
+            socket.off('admission_discharged', fetchStats);
+            socket.off('invoice_generated', fetchStats);
+            socket.off('payment_received', fetchStats);
+            socket.off('invoice_paid', fetchStats);
+            socket.off('refund_processed', fetchStats);
+        };
     }, []);
 
     const fetchStats = async () => {
@@ -77,19 +100,20 @@ const AdminMainDashboard = () => {
     ];
 
     const quickActions = [
-        { icon: '👥', label: 'Manage Users',         desc: 'View all staff & patients, edit roles, create accounts', path: '/admin/users',            bg: 'rgba(20,184,166,0.12)' },
-        { icon: '🔑', label: 'Roles & Permissions',  desc: 'Create custom roles and assign granular permissions',    path: '/admin/roles',            bg: 'rgba(99,102,241,0.12)' },
-        { icon: '👨‍⚕️', label: 'Doctors',             desc: 'Manage doctor profiles, specializations & schedules',  path: '/admin/doctors',          bg: 'rgba(59,130,246,0.12)' },
-        { icon: '🧪', label: 'Labs',                 desc: 'Configure lab departments and lab workflows',            path: '/admin/labs',             bg: 'rgba(245,158,11,0.12)' },
-        { icon: '📋', label: 'Lab Tests Catalog',    desc: 'Manage predefined lab tests for prescription',           path: '/admin/lab-tests',        bg: 'rgba(236,72,153,0.12)' },
-        { icon: '📦', label: 'Tests & Packages',     desc: 'Create test packages and manage individual tests',       path: '/admin/test-packages',    bg: 'rgba(124,58,237,0.12)' },
-        { icon: '💊', label: 'Pharmacy',             desc: 'Manage pharmacy inventory and suppliers',                path: '/admin/pharmacy',         bg: 'rgba(239,68,68,0.12)'  },
-        { icon: '💉', label: 'Medicine Catalog',     desc: 'Manage global catalog of available medicines',           path: '/admin/medicines',        bg: 'rgba(239,68,68,0.1)'   },
-        { icon: '🏥', label: 'Reception',            desc: 'Set up reception desk and appointment workflows',        path: '/admin/reception',        bg: 'rgba(16,185,129,0.12)' },
-        { icon: '🛠️', label: 'Services',             desc: 'Hospital services, pricing, and categories',             path: '/admin/services',         bg: 'rgba(245,158,11,0.12)' },
-        { icon: '🛏️', label: 'Wards & Facilities',   desc: 'Configure hospital wards (ICU, OT, deluxe, wards, etc.)', path: '/admin/facilities',       bg: 'rgba(59,130,246,0.12)' },
-        { icon: '👤', label: 'Create Staff Account', desc: 'Add a new staff member with login credentials',          path: '/admin/users',            bg: 'rgba(94,234,212,0.15)' },
-        { icon: '❓', label: 'Question Library',     desc: 'Configure forms and assessment libraries for doctors',   path: '/admin/question-library', bg: 'rgba(167,139,250,0.15)' },
+        { icon: '👥', label: 'Manage Users',           desc: 'View all staff & patients, edit roles, create accounts',        path: '/admin/users',            bg: 'rgba(20,184,166,0.12)'  },
+        { icon: '🔑', label: 'Roles & Permissions',    desc: 'Create custom roles and assign granular permissions',            path: '/admin/roles',            bg: 'rgba(99,102,241,0.12)'  },
+        { icon: '🔐', label: 'Dynamic Permissions',    desc: 'Grant or revoke individual permissions per staff member',        path: '/admin/permissions',      bg: 'rgba(124,58,237,0.15)'  },
+        { icon: '👨‍⚕️', label: 'Doctors',               desc: 'Manage doctor profiles, specializations & schedules',           path: '/admin/doctors',          bg: 'rgba(59,130,246,0.12)'  },
+        { icon: '🧪', label: 'Labs',                   desc: 'Configure lab departments and lab workflows',                    path: '/admin/labs',             bg: 'rgba(245,158,11,0.12)'  },
+        { icon: '📋', label: 'Lab Tests Catalog',      desc: 'Manage predefined lab tests for prescription',                   path: '/admin/lab-tests',        bg: 'rgba(236,72,153,0.12)'  },
+        { icon: '📦', label: 'Tests & Packages',       desc: 'Create test packages and manage individual tests',               path: '/admin/test-packages',    bg: 'rgba(124,58,237,0.12)'  },
+        { icon: '💊', label: 'Pharmacy',               desc: 'Manage pharmacy inventory and suppliers',                        path: '/admin/pharmacy',         bg: 'rgba(239,68,68,0.12)'   },
+        { icon: '💉', label: 'Medicine Catalog',       desc: 'Manage global catalog of available medicines',                   path: '/admin/medicines',        bg: 'rgba(239,68,68,0.1)'    },
+        { icon: '🏥', label: 'Reception',              desc: 'Set up reception desk and appointment workflows',                path: '/admin/reception',        bg: 'rgba(16,185,129,0.12)'  },
+        { icon: '🛠️', label: 'Services',               desc: 'Hospital services, pricing, and categories',                     path: '/admin/services',         bg: 'rgba(245,158,11,0.12)'  },
+        { icon: '🛏️', label: 'Wards & Facilities',     desc: 'Configure hospital wards (ICU, OT, deluxe, wards, etc.)',       path: '/admin/facilities',       bg: 'rgba(59,130,246,0.12)'  },
+        { icon: '👤', label: 'Create Staff Account',   desc: 'Add a new staff member with login credentials',                  path: '/admin/users',            bg: 'rgba(94,234,212,0.15)'  },
+        { icon: '❓', label: 'Question Library',       desc: 'Configure forms and assessment libraries for doctors',           path: '/admin/question-library', bg: 'rgba(167,139,250,0.15)' },
     ];
 
     return (

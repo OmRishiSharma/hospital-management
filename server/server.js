@@ -17,6 +17,18 @@ const server = http.createServer(app);
 const isAllowedOrigin = (origin) => {
     if (!origin) return true;
     if (origin.includes('localhost')) return true;
+    
+    // Resolve baseDomain from CLOUD_URL (defaulting to medicalhms.in)
+    const cloudUrl = process.env.CLOUD_URL || 'https://medicalhms.in';
+    const baseDomain = cloudUrl.replace(/^https?:\/\//, '').replace(/\/$/, '').toLowerCase();
+    
+    // Match base domain, www.baseDomain, or *.baseDomain
+    const originHost = origin.replace(/^https?:\/\//, '').replace(/\/$/, '').toLowerCase();
+    if (originHost === baseDomain) return true;
+    if (originHost === `www.${baseDomain}`) return true;
+    if (originHost.endsWith(`.${baseDomain}`)) return true;
+
+    // Fallbacks
     if (origin === 'https://medicalhms.in') return true;
     if (origin === 'https://www.medicalhms.in') return true;
     if (origin.endsWith('.medicalhms.in')) return true;

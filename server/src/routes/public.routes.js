@@ -41,9 +41,14 @@ router.get('/tenant-config', async (req, res) => {
         if (domain) {
             // Remove protocol and trailing slash if mistakenly sent
             const cleanDomain = domain.replace(/^https?:\/\//, '').replace(/\/$/, '').toLowerCase();
-            // Try to match customDomain directly. If it ends with .medicalhms.in, we can extract the slug.
-            if (cleanDomain.endsWith('.medicalhms.in')) {
-                query.slug = cleanDomain.replace('.medicalhms.in', '');
+            
+            // Resolve baseDomain from CLOUD_URL (defaulting to medicalhms.in)
+            const cloudUrl = process.env.CLOUD_URL || 'https://medicalhms.in';
+            const baseDomain = cloudUrl.replace(/^https?:\/\//, '').replace(/\/$/, '').toLowerCase();
+
+            // Try to match customDomain directly. If it ends with .baseDomain, we can extract the slug.
+            if (cleanDomain.endsWith(`.${baseDomain}`)) {
+                query.slug = cleanDomain.replace(`.${baseDomain}`, '');
             } else if (cleanDomain.endsWith('.localhost')) {
                 query.slug = cleanDomain.replace('.localhost', '');
             } else {

@@ -179,8 +179,9 @@ export const BrandingProvider = ({ children }) => {
     useEffect(() => {
         const initBranding = async () => {
             const domain = window.location.hostname;
+            const baseDomain = import.meta.env.VITE_BASE_DOMAIN || 'medicalhms.in';
             // Treat localhost specially for dev, though you can test domains locally by modifying hosts
-            const isBaseDomain = domain === 'medicalhms.in' || domain === 'www.medicalhms.in' || domain === 'localhost';
+            const isBaseDomain = domain === baseDomain || domain === `www.${baseDomain}` || domain === 'localhost';
             let fetchedFromDomain = false;
 
             // If we are on a custom domain, try to fetch the tenant config

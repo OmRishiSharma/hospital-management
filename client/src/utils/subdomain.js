@@ -6,7 +6,8 @@ export const getSubdomain = () => {
         return null;
     }
 
-    const isBaseDomain = hostname === 'medicalhms.in' || hostname === 'www.medicalhms.in';
+    const baseDomain = import.meta.env.VITE_BASE_DOMAIN || 'medicalhms.in';
+    const isBaseDomain = hostname === baseDomain || hostname === `www.${baseDomain}`;
 
     // If it's not the base domain and not localhost, it's either a subdomain of base domain OR a completely custom domain.
     if (!isBaseDomain) {
@@ -17,9 +18,9 @@ export const getSubdomain = () => {
             return parts[0] === 'www' ? null : parts[0];
         }
 
-        // It is a live domain. If it's a subdomain of medicalhms.in:
-        if (hostname.endsWith('.medicalhms.in')) {
-            const subdomain = hostname.replace('.medicalhms.in', '');
+        // It is a live domain. If it's a subdomain of base domain:
+        if (hostname.endsWith(`.${baseDomain}`)) {
+            const subdomain = hostname.replace(`.${baseDomain}`, '');
             return subdomain === 'www' ? null : subdomain;
         }
 

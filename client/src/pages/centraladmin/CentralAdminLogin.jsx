@@ -40,7 +40,9 @@ const CentralAdminLogin = () => {
         setRedirectInfo(null);
         if (!formData.email || !formData.password) return;
         const resultAction = await dispatch(loginAdmin({ email: formData.email, password: formData.password }));
-        if (loginAdmin.rejected.match(resultAction)) {
+        if (loginAdmin.fulfilled.match(resultAction)) {
+            sessionStorage.setItem('justLoggedIn', 'true');
+        } else if (loginAdmin.rejected.match(resultAction)) {
             const payload = resultAction.payload;
             if (payload && payload.hospitalSlug) {
                 setRedirectInfo({

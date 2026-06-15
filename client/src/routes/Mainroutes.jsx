@@ -142,6 +142,10 @@ const SubdomainRoleGuard = ({ children }) => {
 
 const ForceLogout = () => {
     React.useEffect(() => {
+        if (sessionStorage.getItem('justLoggedIn') === 'true') {
+            sessionStorage.removeItem('justLoggedIn');
+            return;
+        }
         localStorage.removeItem('token');
         localStorage.removeItem('user');
         const search = window.location.search;

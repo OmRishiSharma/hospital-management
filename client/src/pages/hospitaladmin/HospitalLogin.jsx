@@ -97,11 +97,14 @@ const HospitalLogin = () => {
         if (!formData.email || !formData.password) return;
 
         // Pass hospitalId along with credentials so backend can embed it in JWT
-        await dispatch(loginUser({
+        const resultAction = await dispatch(loginUser({
             email: formData.email,
             password: formData.password,
             hospitalId: hospital?._id,     // Used by backend to scope the session
         }));
+        if (loginUser.fulfilled.match(resultAction)) {
+            sessionStorage.setItem('justLoggedIn', 'true');
+        }
     };
 
     if (hospitalLoading) {

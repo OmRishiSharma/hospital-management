@@ -104,18 +104,38 @@ const SmartLogin = () => {
     return <CentralAdminLogin />;
 };
 
+/**
+ * SmartDashboardRedirector — handles the `/` route for authenticated users.
+ *
+ * Uses the user's ROLE (from JWT/Redux) as the source of truth — not the subdomain.
+ * This works correctly on Vercel (no real subdomains) and on custom domains alike.
+ *
+ * Central Admin / Superadmin → /supremeadmin
+ * All hospital staff       → their roleData.dashboardPath (from JWT)
+ */
 const SmartDashboardRedirector = () => {
-    const subdomain = getSubdomain();
-    if (subdomain && !RESERVED_SUBDOMAINS.includes(subdomain)) return <Navigate to="/my-dashboard" replace />;
-    return <Navigate to="/supremeadmin" replace />;
+    const { user } = useAuth();
+    const role = (user?.role || '').toLowerCase();
+
+    if (role === 'centraladmin' || role === 'superadmin') {
+        return <Navigate to="/supremeadmin" replace />;
+    }
+
+    // Hospital staff: use dashboardPath from their role definition (set by admin)
+    const dashboardPath = user?.dashboardPath || '/my-dashboard';
+    const cleanPath = dashboardPath.startsWith('/') ? dashboardPath : `/${dashboardPath}`;
+    return <Navigate to={cleanPath} replace />;
 };
 
 /**
  * SubdomainRoleGuard — enforces that the user's role matches the subdomain context.
  *
- * admin.domain.com   → only centraladmin / superadmin allowed
- * slug.domain.com    → hospital staff allowed, centraladmin/superadmin blocked
- * localhost (null)   → no enforcement (local dev without subdomain)
+ * custom-slug.domain.com  → hospital staff only (block centraladmin/superadmin)
+ * admin.domain.com        → centraladmin/superadmin only (block hospital staff)
+ * localhost / Vercel URL  → no subdomain enforcement; role-based routing handles it
+ *
+ * This guard ONLY fires when there is an actual hospital subdomain (non-reserved).
+ * On Vercel (subdomain = null), it is a no-op — the role-based routes handle security.
  */
 const SubdomainRoleGuard = ({ children }) => {
     const { user, isAuthenticated } = useAuth();
@@ -124,15 +144,16 @@ const SubdomainRoleGuard = ({ children }) => {
     if (subdomain && isAuthenticated && user) {
         const role = (user.role || '').toLowerCase();
         const isCentralRole = role === 'centraladmin' || role === 'superadmin';
+        const isHospitalSubdomain = !RESERVED_SUBDOMAINS.includes(subdomain);
         const isAdminSubdomain = subdomain === 'admin';
 
-        // Central admin must operate from admin.* subdomain only
-        if (isCentralRole && !isAdminSubdomain) {
+        // On a hospital tenant subdomain: only hospital staff allowed
+        if (isHospitalSubdomain && isCentralRole) {
             return <Navigate to="/login" replace />;
         }
 
-        // Hospital staff / hospital admin must NOT operate from admin.* subdomain
-        if (!isCentralRole && isAdminSubdomain) {
+        // On admin subdomain: only central roles allowed
+        if (isAdminSubdomain && !isCentralRole) {
             return <Navigate to="/login" replace />;
         }
     }

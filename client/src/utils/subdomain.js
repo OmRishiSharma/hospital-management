@@ -1,4 +1,11 @@
 export const getSubdomain = () => {
+    // 1. Check if slug is passed as a query parameter (for environments where subdomains are not supported, e.g. vercel.app)
+    const urlParams = new URLSearchParams(window.location.search);
+    const querySlug = urlParams.get('slug');
+    if (querySlug) {
+        return querySlug;
+    }
+
     const hostname = window.location.hostname;
 
     // Direct IPs or naked localhost
@@ -6,7 +13,20 @@ export const getSubdomain = () => {
         return null;
     }
 
-    const baseDomain = import.meta.env.VITE_BASE_DOMAIN || 'medicalhms.in';
+    let baseDomain = import.meta.env.VITE_BASE_DOMAIN || 'medicalhms.in';
+
+    // Automatically detect Vercel app domains
+    if (hostname.endsWith('.vercel.app') && !import.meta.env.VITE_BASE_DOMAIN) {
+        const parts = hostname.split('.');
+        if (parts.length === 3) {
+            // E.g. project-name.vercel.app
+            baseDomain = hostname;
+        } else if (parts.length > 3) {
+            // E.g. subdomain.project-name.vercel.app
+            baseDomain = parts.slice(-3).join('.');
+        }
+    }
+
     const isBaseDomain = hostname === baseDomain || hostname === `www.${baseDomain}`;
 
     // If it's not the base domain and not localhost, it's either a subdomain of base domain OR a completely custom domain.

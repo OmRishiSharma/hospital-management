@@ -104,6 +104,18 @@ const CentralAdminDashboard = () => {
     const getBaseHost = () => {
         let host = window.location.host;
         if (host.startsWith('www.')) host = host.replace('www.', '');
+
+        // Handle Vercel domains specifically since wildcard subdomains on vercel.app are not supported
+        if (host.endsWith('.vercel.app')) {
+            const parts = host.split('.');
+            if (parts.length === 3) {
+                host = parts.join('.');
+            } else if (parts.length > 3) {
+                host = parts.slice(-3).join('.');
+            }
+            return host;
+        }
+
         const parts = host.split('.');
         if (parts.length > 2 && !host.includes('localhost')) {
             host = parts.slice(-2).join('.');
@@ -883,7 +895,7 @@ const CentralAdminDashboard = () => {
                                             { label: 'Address', value: h.address },
                                             { label: 'Admin', value: h.adminName || 'Not assigned' },
                                             { label: 'Admin Email', value: h.adminEmail },
-                                            { label: 'Staff Login URL', value: h.slug && `${window.location.protocol}//${h.slug}.${getBaseHost()}/login`, isLink: true },
+                                            { label: 'Staff Login URL', value: h.slug && (getBaseHost().endsWith('.vercel.app') ? `${window.location.protocol}//${getBaseHost()}/login?slug=${h.slug}` : `${window.location.protocol}//${h.slug}.${getBaseHost()}/login`), isLink: true },
                                             { label: 'Custom Domain', value: h.customDomain && `http://${h.customDomain}`, isLink: true },
                                             { label: 'Appointment Fee', value: h.appointmentFee !== undefined && h.appointmentFee !== null ? formatCurrency(h.appointmentFee) : formatCurrency(500) },
                                         ].map((item, i) => item.value && (
@@ -1216,7 +1228,16 @@ const CentralAdminDashboard = () => {
                                                 {h.city && <span>📍 {h.city}{h.state ? `, ${h.state}` : ''}</span>}
                                                 {h.phone && <span>📞 {h.phone}</span>}
                                                 {h.email && <span>✉️ {h.email}</span>}
-                                                {h.slug && <a href={`${window.location.protocol}//${h.slug}.${getBaseHost()}`} target="_blank" rel="noreferrer" style={{ display: 'inline-block', marginTop: '6px', background: 'var(--brand-pink)', color: 'white', padding: '2px 6px', fontSize: '10px', borderRadius: '4px', textDecoration: 'none', marginRight: '6px' }}>🌐 {h.slug}.{getBaseHost()}</a>}
+                                                {h.slug && (
+                                                    <a 
+                                                        href={getBaseHost().endsWith('.vercel.app') ? `${window.location.protocol}//${getBaseHost()}/login?slug=${h.slug}` : `${window.location.protocol}//${h.slug}.${getBaseHost()}`} 
+                                                        target="_blank" 
+                                                        rel="noreferrer" 
+                                                        style={{ display: 'inline-block', marginTop: '6px', background: 'var(--brand-pink)', color: 'white', padding: '2px 6px', fontSize: '10px', borderRadius: '4px', textDecoration: 'none', marginRight: '6px' }}
+                                                    >
+                                                        🌐 {getBaseHost().endsWith('.vercel.app') ? `${getBaseHost()}/login?slug=${h.slug}` : `${h.slug}.${getBaseHost()}`}
+                                                    </a>
+                                                )}
                                                 {h.customDomain && <a href={`http://${h.customDomain}`} target="_blank" rel="noreferrer" style={{ display: 'inline-block', marginTop: '6px', background: '#3b82f6', color: 'white', padding: '2px 6px', fontSize: '10px', borderRadius: '4px', textDecoration: 'none' }}>🌐 {h.customDomain}</a>}
                                                 {(h.departments && h.departments.length > 0) && (
                                                     <div style={{ marginTop: '8px', fontSize: '11px', color: '#64748b' }}>

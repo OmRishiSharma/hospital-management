@@ -38,7 +38,9 @@ router.get('/tenant-config', async (req, res) => {
         const Hospital = require('../models/hospital.model');
         let query = {};
         
-        if (domain) {
+        if (slug) {
+            query.slug = slug.toLowerCase();
+        } else if (domain) {
             // Remove protocol and trailing slash if mistakenly sent
             const cleanDomain = domain.replace(/^https?:\/\//, '').replace(/\/$/, '').toLowerCase();
             
@@ -54,8 +56,6 @@ router.get('/tenant-config', async (req, res) => {
             } else {
                 query.customDomain = cleanDomain;
             }
-        } else if (slug) {
-            query.slug = slug.toLowerCase();
         }
 
         const hospital = await Hospital.findOne(query)

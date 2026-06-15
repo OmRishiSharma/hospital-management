@@ -38,7 +38,8 @@ const HospitalLogin = () => {
             try {
                 setHospitalLoading(true);
                 const domain = window.location.hostname;
-                const res = await publicAPI.getTenantConfig(domain);
+                const slug = getSubdomain();
+                const res = await publicAPI.getTenantConfig(domain, slug);
                 
                 if (res.success && res.tenant) {
                     setHospital({

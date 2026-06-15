@@ -858,8 +858,11 @@ export const publicAPI = {
         const url = serviceId ? `/api/doctor?serviceId=${serviceId}` : '/api/doctor';
         return (await apiClient.get(url)).data;
     },
-    getTenantConfig: async (domain) => {
-        const url = `/api/public/tenant-config?domain=${encodeURIComponent(domain)}`;
+    getTenantConfig: async (domain, slug = '') => {
+        let url = `/api/public/tenant-config?domain=${encodeURIComponent(domain)}`;
+        if (slug) {
+            url += `&slug=${encodeURIComponent(slug)}`;
+        }
         return (await apiClient.get(url)).data;
     }
 };

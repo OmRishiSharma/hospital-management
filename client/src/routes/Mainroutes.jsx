@@ -140,35 +140,41 @@ const SubdomainRoleGuard = ({ children }) => {
     return children;
 };
 
-const ForceLogout = () => {
-    const navigate = useNavigate();
-    const { user } = useAuth();
-
+/**
+ * PortalSwitch — sub-component that clears auth and reloads to the target hospital slug.
+ * Separated to avoid conditional hook call violations.
+ */
+const PortalSwitch = ({ slug }) => {
     React.useEffect(() => {
-        // Only force logout when switching to a specific hospital portal (?slug=xxx)
-        const search = window.location.search;
-        const params = new URLSearchParams(search);
-        const targetSlug = params.get('slug');
-
-        if (targetSlug) {
-            // Explicit portal switch — clear session and reload to hospital login page
-            localStorage.removeItem('token');
-            localStorage.removeItem('user');
-            window.location.href = `/login?slug=${targetSlug}`;
-        } else {
-            // Already authenticated, no explicit logout request — go to their dashboard
-            const dashboardPath = user?.dashboardPath || '/supremeadmin';
-            navigate(dashboardPath, { replace: true });
-        }
-    }, [navigate, user]);
-
+        localStorage.removeItem('token');
+        localStorage.removeItem('user');
+        window.location.href = `/login?slug=${encodeURIComponent(slug)}`;
+    }, []); // eslint-disable-line react-hooks/exhaustive-deps
     return (
         <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh', background: '#f8fafc' }}>
-            <div style={{ textAlign: 'center' }}>
-                <p style={{ color: '#64748b', fontSize: '16px' }}>Redirecting...</p>
-            </div>
+            <p style={{ color: '#64748b', fontSize: '16px' }}>Switching portal...</p>
         </div>
     );
+};
+
+/**
+ * ForceLogout — handles /login route when user is already authenticated.
+ *
+ * /login?slug=xxx  → Switch to a hospital portal (clears session, reloads).
+ * /login (no slug) → Already logged in; redirect straight to their dashboard.
+ */
+const ForceLogout = () => {
+    const { user } = useAuth();
+    const params = new URLSearchParams(window.location.search);
+    const targetSlug = params.get('slug');
+
+    if (targetSlug) {
+        return <PortalSwitch slug={targetSlug} />;
+    }
+
+    // No slug — already authenticated, send them to their dashboard immediately
+    const dashboardPath = user?.dashboardPath || '/supremeadmin';
+    return <Navigate to={dashboardPath} replace />;
 };
 
 const MainRoutes = () => {

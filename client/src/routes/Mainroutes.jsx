@@ -140,6 +140,22 @@ const SubdomainRoleGuard = ({ children }) => {
     return children;
 };
 
+const ForceLogout = () => {
+    React.useEffect(() => {
+        localStorage.removeItem('token');
+        localStorage.removeItem('user');
+        const search = window.location.search;
+        window.location.href = `/login${search}`;
+    }, []);
+    return (
+        <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh', background: '#f8fafc' }}>
+            <div style={{ textAlign: 'center' }}>
+                <p style={{ color: '#64748b', fontSize: '16px' }}>Switching portals...</p>
+            </div>
+        </div>
+    );
+};
+
 const MainRoutes = () => {
     const { isAuthenticated } = useAuth();
     
@@ -152,6 +168,7 @@ const MainRoutes = () => {
                   <SubdomainRoleGuard>
                     <Routes>
                         <Route path="/" element={<SmartDashboardRedirector />} />
+                        <Route path="/login" element={<ForceLogout />} />
                         <Route path="/services" element={<Navigate to="/" replace />} />
                         <Route path="/doctors" element={<Navigate to="/" replace />} />
                         <Route path="/services/:serviceId/doctors" element={<Navigate to="/" replace />} />

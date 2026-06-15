@@ -141,20 +141,31 @@ const SubdomainRoleGuard = ({ children }) => {
 };
 
 const ForceLogout = () => {
+    const navigate = useNavigate();
+    const { user } = useAuth();
+
     React.useEffect(() => {
-        if (sessionStorage.getItem('justLoggedIn') === 'true') {
-            sessionStorage.removeItem('justLoggedIn');
-            return;
-        }
-        localStorage.removeItem('token');
-        localStorage.removeItem('user');
+        // Only force logout when switching to a specific hospital portal (?slug=xxx)
         const search = window.location.search;
-        window.location.href = `/login${search}`;
-    }, []);
+        const params = new URLSearchParams(search);
+        const targetSlug = params.get('slug');
+
+        if (targetSlug) {
+            // Explicit portal switch — clear session and reload to hospital login page
+            localStorage.removeItem('token');
+            localStorage.removeItem('user');
+            window.location.href = `/login?slug=${targetSlug}`;
+        } else {
+            // Already authenticated, no explicit logout request — go to their dashboard
+            const dashboardPath = user?.dashboardPath || '/supremeadmin';
+            navigate(dashboardPath, { replace: true });
+        }
+    }, [navigate, user]);
+
     return (
         <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh', background: '#f8fafc' }}>
             <div style={{ textAlign: 'center' }}>
-                <p style={{ color: '#64748b', fontSize: '16px' }}>Switching portals...</p>
+                <p style={{ color: '#64748b', fontSize: '16px' }}>Redirecting...</p>
             </div>
         </div>
     );

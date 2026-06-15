@@ -288,6 +288,15 @@ router.post('/login', loginLimiter, async (req, res) => {
 
             if (user.hospitalId && !isAdminLevelRole) {
                 if (process.env.NODE_ENV === 'production') {
+                    const hospital = await Hospital.findById(user.hospitalId);
+                    if (hospital && hospital.slug) {
+                        return res.status(403).json({
+                            success: false,
+                            message: 'Access denied: Please log in using your specific clinic portal URL.',
+                            hospitalSlug: hospital.slug,
+                            hospitalName: hospital.name
+                        });
+                    }
                     return res.status(403).json({ success: false, message: 'Access denied: Please log in using your specific clinic portal URL.' });
                 } else {
                     console.warn(`[DEV WARNING] Non-admin staff logging in without subdomain portal. Allowing in development.`);

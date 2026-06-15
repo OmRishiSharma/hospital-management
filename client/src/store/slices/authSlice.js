@@ -14,7 +14,7 @@ export const loginUser = createAsyncThunk(
       }
       return rejectWithValue(response.message || 'Login failed');
     } catch (error) {
-      return rejectWithValue(error.response?.data?.message || 'Login failed');
+      return rejectWithValue(error.response?.data || { message: 'Login failed' });
     }
   }
 );
@@ -31,7 +31,7 @@ export const signupUser = createAsyncThunk(
       }
       return rejectWithValue(response.message || 'Signup failed');
     } catch (error) {
-      return rejectWithValue(error.response?.data?.message || 'Signup failed');
+      return rejectWithValue(error.response?.data || { message: 'Signup failed' });
     }
   }
 );
@@ -48,7 +48,7 @@ export const loginAdmin = createAsyncThunk(
       }
       return rejectWithValue(response.message || 'Login failed');
     } catch (error) {
-      return rejectWithValue(error.response?.data?.message || 'Login failed');
+      return rejectWithValue(error.response?.data || { message: 'Login failed' });
     }
   }
 );
@@ -65,7 +65,7 @@ export const loginHospitalAdmin = createAsyncThunk(
       }
       return rejectWithValue(response.message || 'Login failed');
     } catch (error) {
-      return rejectWithValue(error.response?.data?.message || 'Login failed');
+      return rejectWithValue(error.response?.data || { message: 'Login failed' });
     }
   }
 );
@@ -82,7 +82,7 @@ export const signupAdmin = createAsyncThunk(
       }
       return rejectWithValue(response.message || 'Signup failed');
     } catch (error) {
-      return rejectWithValue(error.response?.data?.message || 'Signup failed');
+      return rejectWithValue(error.response?.data || { message: 'Signup failed' });
     }
   }
 );
@@ -141,7 +141,10 @@ const authSlice = createSlice({
       state.token = action.payload.token;
       state.isAuthenticated = true;
     });
-    builder.addCase(loginUser.rejected, (state, action) => { state.loading = false; state.error = action.payload; });
+    builder.addCase(loginUser.rejected, (state, action) => {
+      state.loading = false;
+      state.error = typeof action.payload === 'object' ? action.payload.message : action.payload;
+    });
 
     // Signup User
     builder.addCase(signupUser.pending, (state) => { state.loading = true; state.error = null; });
@@ -151,7 +154,10 @@ const authSlice = createSlice({
       state.token = action.payload.token;
       state.isAuthenticated = true;
     });
-    builder.addCase(signupUser.rejected, (state, action) => { state.loading = false; state.error = action.payload; });
+    builder.addCase(signupUser.rejected, (state, action) => {
+      state.loading = false;
+      state.error = typeof action.payload === 'object' ? action.payload.message : action.payload;
+    });
 
     // Login Admin
     builder.addCase(loginAdmin.pending, (state) => { state.loading = true; state.error = null; });
@@ -161,7 +167,10 @@ const authSlice = createSlice({
       state.token = action.payload.token;
       state.isAuthenticated = true;
     });
-    builder.addCase(loginAdmin.rejected, (state, action) => { state.loading = false; state.error = action.payload; });
+    builder.addCase(loginAdmin.rejected, (state, action) => {
+      state.loading = false;
+      state.error = typeof action.payload === 'object' ? action.payload.message : action.payload;
+    });
 
     // Signup Admin
     builder.addCase(signupAdmin.pending, (state) => { state.loading = true; state.error = null; });
@@ -171,7 +180,10 @@ const authSlice = createSlice({
       state.token = action.payload.token;
       state.isAuthenticated = true;
     });
-    builder.addCase(signupAdmin.rejected, (state, action) => { state.loading = false; state.error = action.payload; });
+    builder.addCase(signupAdmin.rejected, (state, action) => {
+      state.loading = false;
+      state.error = typeof action.payload === 'object' ? action.payload.message : action.payload;
+    });
 
     // Login Hospital Admin
     builder.addCase(loginHospitalAdmin.pending, (state) => { state.loading = true; state.error = null; });
@@ -181,7 +193,10 @@ const authSlice = createSlice({
       state.token = action.payload.token;
       state.isAuthenticated = true;
     });
-    builder.addCase(loginHospitalAdmin.rejected, (state, action) => { state.loading = false; state.error = action.payload; });
+    builder.addCase(loginHospitalAdmin.rejected, (state, action) => {
+      state.loading = false;
+      state.error = typeof action.payload === 'object' ? action.payload.message : action.payload;
+    });
   },
 });
 

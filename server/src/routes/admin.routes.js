@@ -305,6 +305,17 @@ router.post('/login', async (req, res) => {
 
         // Only centraladmin/superadmin allowed through this endpoint
         if (roleName !== 'superadmin' && roleName !== 'centraladmin' && roleName !== 'admin') {
+            if (user.hospitalId) {
+                const hospital = await Hospital.findById(user.hospitalId);
+                if (hospital && hospital.slug) {
+                    return res.status(403).json({
+                        success: false,
+                        message: 'Access denied. Central Admin only.',
+                        hospitalSlug: hospital.slug,
+                        hospitalName: hospital.name
+                    });
+                }
+            }
             return res.status(403).json({ success: false, message: 'Access denied. Central Admin only.' });
         }
 

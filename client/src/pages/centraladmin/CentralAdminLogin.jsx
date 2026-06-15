@@ -13,6 +13,7 @@ const CentralAdminLogin = () => {
     const { loading, error, isAuthenticated, user } = useAuth();
 
     const [formData, setFormData] = useState({ email: '', password: '' });
+    const [redirectInfo, setRedirectInfo] = useState(null);
 
     useEffect(() => {
         dispatch(clearError());
@@ -30,13 +31,24 @@ const CentralAdminLogin = () => {
     const handleChange = (e) => {
         setFormData({ ...formData, [e.target.name]: e.target.value });
         dispatch(clearError());
+        setRedirectInfo(null);
     };
 
     const handleSubmit = async (e) => {
         e.preventDefault();
         dispatch(clearError());
+        setRedirectInfo(null);
         if (!formData.email || !formData.password) return;
-        await dispatch(loginAdmin({ email: formData.email, password: formData.password }));
+        const resultAction = await dispatch(loginAdmin({ email: formData.email, password: formData.password }));
+        if (loginAdmin.rejected.match(resultAction)) {
+            const payload = resultAction.payload;
+            if (payload && payload.hospitalSlug) {
+                setRedirectInfo({
+                    slug: payload.hospitalSlug,
+                    name: payload.hospitalName
+                });
+            }
+        }
     };
 
     return (
@@ -81,7 +93,47 @@ const CentralAdminLogin = () => {
                                         animate={{ height: 'auto', opacity: 1 }}
                                         className="error-message"
                                     >
-                                        {error}
+                                        <div>{error}</div>
+                                        {redirectInfo && (
+                                            <div style={{
+                                                marginTop: '10px',
+                                                paddingTop: '8px',
+                                                borderTop: '1px solid rgba(239, 68, 68, 0.2)',
+                                                fontSize: '0.85rem',
+                                                fontWeight: 'normal',
+                                                color: '#7f1d1d'
+                                            }}>
+                                                Are you looking for the portal for <strong>{redirectInfo.name}</strong>?
+                                                <br />
+                                                <Link
+                                                    to={`/login?slug=${redirectInfo.slug}`}
+                                                    style={{
+                                                        display: 'inline-flex',
+                                                        alignItems: 'center',
+                                                        gap: '4px',
+                                                        color: '#b91c1c',
+                                                        fontWeight: '700',
+                                                        textDecoration: 'none',
+                                                        marginTop: '6px',
+                                                        padding: '4px 8px',
+                                                        background: 'rgba(239, 68, 68, 0.1)',
+                                                        borderRadius: '6px',
+                                                        border: '1px solid rgba(239, 68, 68, 0.2)',
+                                                        transition: 'all 0.2s'
+                                                    }}
+                                                    onMouseOver={(e) => {
+                                                        e.currentTarget.style.background = 'rgba(239, 68, 68, 0.15)';
+                                                        e.currentTarget.style.borderColor = 'rgba(239, 68, 68, 0.3)';
+                                                    }}
+                                                    onMouseOut={(e) => {
+                                                        e.currentTarget.style.background = 'rgba(239, 68, 68, 0.1)';
+                                                        e.currentTarget.style.borderColor = 'rgba(239, 68, 68, 0.2)';
+                                                    }}
+                                                >
+                                                    Log In to {redirectInfo.name} &rarr;
+                                                </Link>
+                                            </div>
+                                        )}
                                     </motion.div>
                                 )}
 
